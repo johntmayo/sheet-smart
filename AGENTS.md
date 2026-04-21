@@ -41,27 +41,32 @@ Phase 2 uses two Apps Script files: **`MergeEngine.gs`** (lookup-and-merge core)
 
 The config spreadsheet holds:
 
-- **Settings** — Source Spreadsheet, Match Column, Target Folder, Master Spreadsheet.
+- **Settings** — Master Spreadsheet, External Source, User Sheet, User Sheets Folder, Match Column, and rename keys (`Rename Column - From`, `Rename Column - To`).
 - **Column Mapping** — Source Column → Target Column pairs for aligning columns between source and targets.
 
-**Three operations (each automatically adds missing columns then fills data):**
+**Three sync operations (each automatically adds missing columns then fills data):**
 
 1. **Import → Master** — external source spreadsheet → master (by match column).
 2. **Push → User Sheet** — master → a single user spreadsheet.
 3. **Push → User Sheets Folder** — master → every spreadsheet in the configured folder.
 
-A fourth menu item, **Set Up Config Tabs**, initializes the Settings and Column Mapping tabs with labels and instructions.
+**One schema operation (header-only):**
+
+4. **Rename Columns → User Sheets Folder** — renames one header across every spreadsheet in the configured folder (row 1 only; data rows untouched).
+
+A final menu item, **Set Up Config Tabs**, initializes the Settings and Column Mapping tabs with labels and instructions.
 
 **Settings keys used by each operation:**
 - Import → Master: `External Source`, `Master Spreadsheet`, `Match Column`
 - Push → User Sheet: `Master Spreadsheet`, `User Sheet`, `Match Column`
 - Push → User Sheets Folder: `Master Spreadsheet`, `User Sheets Folder`, `Match Column`
+- Rename Columns → User Sheets Folder: `User Sheets Folder`, `Rename Column - From`, `Rename Column - To`
 
 Each operation reads only its own settings; unused settings are ignored.
 
 **Write policy (Option D):** fill blank cells only; when a cell already has a value that differs from the incoming value, **do not overwrite** — record it as a conflict for manual review. Never silently overwrite non-blank disagreements.
 
-**Outputs:** run summaries, metrics, and unified sync logs (Column Added / Filled / Conflict / Error) are written to **tabs on the same config spreadsheet** (`Last Import`, `Last Push - User Sheet`, `Last Push - Folder`, and dry-run variants).
+**Outputs:** run summaries, metrics, and operation logs are written to **tabs on the same config spreadsheet** (`Last Import`, `Last Push - User Sheet`, `Last Push - Folder`, `Last Rename - Folder`, and dry-run variants).
 
 **UI:** `SpreadsheetApp.getUi()` and other container-bound APIs **are** used in `Corrections.gs` because the script is bound to the config spreadsheet. That restriction applies only to the **standalone** Phase 1 audit (`Code.gs`).
 

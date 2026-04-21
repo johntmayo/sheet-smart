@@ -2,7 +2,7 @@
 // Corrections.gs — UI & Entry Points for Sheet Smart
 // ============================================================
 // Container-bound script inside the "Sheet Smart Config"
-// spreadsheet. Provides a custom menu with eight actions:
+// spreadsheet. Provides a custom menu with nine actions:
 //
 //   Import → Master              bring data INTO the master from
 //                                an external source spreadsheet
@@ -12,6 +12,9 @@
 //
 //   Push → User Sheets Folder    push data FROM the master into
 //                                every sheet in a Drive folder
+//
+//   Rename Columns → Folder      rename one header across every
+//                                sheet in a Drive folder
 //
 //   Set Up Config Tabs           format Settings & Column Mapping
 //                                with labels and instructions
@@ -35,6 +38,9 @@ function onOpen() {
     .addSeparator()
     .addItem('Push → User Sheets Folder', 'pushToFolder')
     .addItem('Push → User Sheets Folder (Dry Run)', 'pushToFolderDryRun')
+    .addSeparator()
+    .addItem('Rename Columns → User Sheets Folder', 'renameColumnsInFolder')
+    .addItem('Rename Columns → User Sheets Folder (Dry Run)', 'renameColumnsInFolderDryRun')
     .addSeparator()
     .addItem('Set Up Config Tabs', 'setupConfigTabs')
     .addToUi();
@@ -233,6 +239,75 @@ function runPushToFolder_(dryRun) {
   }
 }
 
+// -------  Rename Columns → User Sheets Folder  -------
+//
+// Renames a single header across every Google Sheet in the
+// configured user folder. Only row-1 header cells are changed.
+// Data rows are never edited by this operation.
+
+function renameColumnsInFolder()       { runRenameColumnsInFolder_(false); }
+function renameColumnsInFolderDryRun() { runRenameColumnsInFolder_(true);  }
+
+function runRenameColumnsInFolder_(dryRun) {
+  var ui = SpreadsheetApp.getUi();
+  try {
+    var configSs = SpreadsheetApp.getActiveSpreadsheet();
+    var config = readMergeConfig_(configSs);
+
+    if (!config.folderId)   throw new Error('User Sheets Folder is not set in the Settings tab.');
+    if (!config.renameFrom) throw new Error('Rename Column - From is not set in the Settings tab.');
+    if (!config.renameTo)   throw new Error('Rename Column - To is not set in the Settings tab.');
+
+    var folder = DriveApp.getFolderById(config.folderId);
+    var iter = folder.getFilesByType(MimeType.GOOGLE_SHEETS);
+    var files = [];
+    while (iter.hasNext()) files.push(iter.next());
+    files.sort(function (a, b) { return a.getName().localeCompare(b.getName()); });
+
+    var logTab = dryRun ? 'Dry Run - Rename Folder' : 'Last Rename - Folder';
+    var old = configSs.getSheetByName(logTab);
+    if (old) configSs.deleteSheet(old);
+
+    var totalRenamed = 0, totalSkipped = 0, totalErrors = 0;
+
+    for (var i = 0; i < files.length; i++) {
+      var file = files[i];
+      var fileName = file.getName();
+      try {
+        var ss = SpreadsheetApp.openById(file.getId());
+        var sheet = ss.getSheets()[0];
+        var result = renameColumnInTarget_(sheet, config.renameFrom, config.renameTo, dryRun);
+
+        appendToRenameLog_(configSs, logTab, fileName, config.renameFrom, config.renameTo, result);
+
+        if (result.renamed) totalRenamed++;
+        else if (result.skipped) totalSkipped++;
+        else totalErrors++;
+      } catch (e) {
+        appendToRenameLog_(configSs, logTab, fileName, config.renameFrom, config.renameTo, {
+          renamed: false,
+          skipped: false,
+          error: e.message,
+          note: ''
+        });
+        totalErrors++;
+      }
+    }
+
+    var prefix = dryRun ? 'DRY RUN — Rename Columns → Folder\n\n' : 'Rename Columns → Folder complete.\n\n';
+    ui.alert(
+      prefix +
+      'Sheets processed: ' + files.length + '\n' +
+      'Headers renamed: ' + totalRenamed + '\n' +
+      'Skipped: ' + totalSkipped + '\n' +
+      'Errors: ' + totalErrors + '\n\n' +
+      'See the "' + logTab + '" tab for details.'
+    );
+  } catch (e) {
+    ui.alert('Rename Columns → User Sheets Folder failed:\n\n' + e.message);
+  }
+}
+
 // -------  Set Up Config Tabs  -------
 //
 // Formats the Settings and Column Mapping tabs with labels,
@@ -322,6 +397,18 @@ function setupSettingsTab_(ss) {
       existingValues['Match Column'] || '',
       'The column header that exists in both master and user sheets and uniquely ' +
       'identifies each row (e.g. APN). Must match exactly — same spelling and capitalization.'
+    ],
+    [
+      'Rename Column - From',
+      existingValues['Rename Column - From'] || '',
+      'For "Rename Columns → User Sheets Folder": the existing header name to rename ' +
+      '(exact match, including spelling and capitalization).'
+    ],
+    [
+      'Rename Column - To',
+      existingValues['Rename Column - To'] || '',
+      'For "Rename Columns → User Sheets Folder": the new header name to write. ' +
+      'If this header already exists in a sheet, that sheet is skipped and logged.'
     ]
   ];
 

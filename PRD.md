@@ -26,7 +26,7 @@ There is currently no way to see which sheets are out of sync, what specifically
 
 - Cell-level edit history or per-user change tracking (Google doesn't expose this programmatically).
 - Automatic conflict resolution. The tool flags conflicts; the human decides.
-- Schema enforcement beyond column addition. The tool can add missing columns to user sheets (Phase 2), but does not reorder or rename existing columns.
+- Full schema harmonization. The tool can add missing columns and perform explicit folder-wide header renames, but does not reorder columns or perform implicit schema rewrites.
 
 ## Key concepts
 
@@ -58,8 +58,10 @@ Integrate data across spreadsheets in two directions.
 
 - **Sync → Master Spreadsheet:** Given a source spreadsheet, add any missing mapped columns to the master, then match rows by the match column and fill blank cells.
 - **Sync → User Sheets Folder:** Using the master as the source, add any missing mapped columns to each user sheet, then fill blank cells across all sheets in the folder.
+- **Rename Columns → User Sheets Folder:** Rename a specific header (`from` → `to`) across all user sheets in a folder without touching row data.
 - Each sync is one operation — adding missing columns and filling data happen in the same run, in the right order.
 - **Write policy:** Fill blank cells only. Never overwrite. Log conflicts.
+- **Rename safety policy:** Rename only row-1 headers; skip and log if old header is missing or new header already exists.
 - **Dry run mode:** Preview all additions, fills, and conflicts without writing anything.
 - **Conflict log:** For each conflict, record the spreadsheet name, row, column, existing value, and intended value.
 - **Interface:** A config spreadsheet with a Settings tab and Column Mapping tab. A "Set Up Config Tabs" menu action initializes both tabs with labels and instructions. Custom menu for triggering all operations.

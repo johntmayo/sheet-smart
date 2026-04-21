@@ -15,7 +15,7 @@
  * spreadsheet and returns a structured config object.
  *
  * @param {SpreadsheetApp.Spreadsheet} configSpreadsheet
- * @return {{ sourceId: string, matchColumn: string, folderId: string, masterId: string, columnMap: Array<{source: string, target: string}> }}
+ * @return {{ sourceId: string, matchColumn: string, folderId: string, masterId: string, renameFrom: string, renameTo: string, columnMap: Array<{source: string, target: string}> }}
  */
 function readMergeConfig_(configSpreadsheet) {
   var settingsSheet = configSpreadsheet.getSheetByName('Settings');
@@ -48,6 +48,8 @@ function readMergeConfig_(configSpreadsheet) {
     userSheetId:  settings['User Sheet'] || '',
     folderId:     settings['User Sheets Folder'] || settings['Target Folder'] || '',
     matchColumn:  settings['Match Column'] || '',
+    renameFrom:   settings['Rename Column - From'] || '',
+    renameTo:     settings['Rename Column - To'] || '',
     columnMap:    columnMap
   };
 }
@@ -454,4 +456,75 @@ function appendToResultsLog_(spreadsheet, tabName, sheetName, results) {
     var startRow = tab.getLastRow() + 1;
     tab.getRange(startRow, 1, newRows.length, header.length).setValues(newRows);
   }
+}
+
+/**
+ * Renames a header in the first row of a target sheet.
+ * Only the header row is changed; data rows are untouched.
+ *
+ * @param {SpreadsheetApp.Sheet} targetSheet
+ * @param {string} oldHeader
+ * @param {string} newHeader
+ * @param {boolean} dryRun
+ * @return {{ renamed: boolean, skipped: boolean, error: string, note: string }}
+ */
+function renameColumnInTarget_(targetSheet, oldHeader, newHeader, dryRun) {
+  var data = targetSheet.getDataRange().getValues();
+  if (data.length === 0) {
+    return { renamed: false, skipped: false, error: 'Target sheet is empty', note: '' };
+  }
+
+  var oldName = String(oldHeader).trim();
+  var newName = String(newHeader).trim();
+  if (oldName === '' || newName === '') {
+    return { renamed: false, skipped: false, error: 'Old and new header names are required', note: '' };
+  }
+  if (oldName === newName) {
+    return { renamed: false, skipped: true, error: '', note: 'Old and new header are identical' };
+  }
+
+  var headers = data[0].map(function (h) { return String(h).trim(); });
+  var oldIdx = headers.indexOf(oldName);
+  if (oldIdx === -1) {
+    return { renamed: false, skipped: true, error: '', note: 'Old header not found' };
+  }
+
+  var newIdx = headers.indexOf(newName);
+  if (newIdx !== -1 && newIdx !== oldIdx) {
+    return { renamed: false, skipped: true, error: '', note: 'New header already exists' };
+  }
+
+  if (!dryRun) {
+    data[0][oldIdx] = newName;
+    targetSheet.getRange(1, 1, 1, data[0].length).setValues([data[0]]);
+  }
+
+  return { renamed: true, skipped: false, error: '', note: '' };
+}
+
+/**
+ * Appends folder-wide rename results to a log tab.
+ *
+ * @param {SpreadsheetApp.Spreadsheet} spreadsheet
+ * @param {string} tabName
+ * @param {string} sheetName
+ * @param {string} oldHeader
+ * @param {string} newHeader
+ * @param {{ renamed: boolean, skipped: boolean, error: string, note: string }} result
+ */
+function appendToRenameLog_(spreadsheet, tabName, sheetName, oldHeader, newHeader, result) {
+  var tab = spreadsheet.getSheetByName(tabName);
+  var header = ['Type', 'Spreadsheet', 'Old Header', 'New Header', 'Notes'];
+  if (!tab) {
+    tab = spreadsheet.insertSheet(tabName);
+    tab.getRange(1, 1, 1, header.length).setValues([header]);
+    formatHeaderRow_(tab, header.length);
+    tab.setFrozenRows(1);
+  }
+
+  var rowType = result.renamed ? 'Renamed' : (result.skipped ? 'Skipped' : 'Error');
+  var note = result.error || result.note || '';
+  tab.getRange(tab.getLastRow() + 1, 1, 1, header.length).setValues([
+    [rowType, sheetName, oldHeader, newHeader, note]
+  ]);
 }
