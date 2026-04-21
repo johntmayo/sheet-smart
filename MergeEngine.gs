@@ -91,9 +91,13 @@ function buildSourceLookup_(sourceData, headers, matchColumn) {
  * @param {string} matchColumn                 Column name to match on
  * @param {Array<{source: string, target: string}>} columnMap
  * @param {boolean} dryRun                     If true, log only — never write
+ * @param {Array<string>=} virtualAddedColumns Column headers that the caller
+ *        just "added" in dry-run mode (i.e. not actually written to the sheet
+ *        yet). Treated as if present in the target header row so fills can be
+ *        logged instead of reported as missing-column errors.
  * @return {{ filled: Array, conflicts: Array, errors: Array }}
  */
-function mergeIntoTarget_(targetSheet, sourceLookup, matchColumn, columnMap, dryRun) {
+function mergeIntoTarget_(targetSheet, sourceLookup, matchColumn, columnMap, dryRun, virtualAddedColumns) {
   var filled = [];
   var conflicts = [];
   var errors = [];
@@ -105,6 +109,19 @@ function mergeIntoTarget_(targetSheet, sourceLookup, matchColumn, columnMap, dry
   }
 
   var targetHeaders = data[0].map(function (h) { return String(h).trim(); });
+
+  // Dry-run bridge: addColumnsToTarget_ doesn't actually write headers in dry
+  // mode, so those columns are absent from the sheet we just read. Treat them
+  // as present here; their per-row cells will index out of the real row array
+  // and resolve to undefined, which the blank check below handles correctly.
+  if (virtualAddedColumns && virtualAddedColumns.length) {
+    for (var v = 0; v < virtualAddedColumns.length; v++) {
+      var vcol = String(virtualAddedColumns[v]).trim();
+      if (vcol !== '' && targetHeaders.indexOf(vcol) === -1) {
+        targetHeaders.push(vcol);
+      }
+    }
+  }
 
   var matchIdx = targetHeaders.indexOf(matchColumn);
   if (matchIdx === -1) {

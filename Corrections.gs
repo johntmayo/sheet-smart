@@ -74,7 +74,8 @@ function runImport_(dryRun) {
 
     var targetCols  = config.columnMap.map(function (m) { return m.target; });
     var addResult   = addColumnsToTarget_(masterSheet, targetCols, dryRun);
-    var mergeResult = mergeIntoTarget_(masterSheet, sourceLookup, config.matchColumn, config.columnMap, dryRun);
+    var virtualCols = addResult.added.map(function (a) { return a.column; });
+    var mergeResult = mergeIntoTarget_(masterSheet, sourceLookup, config.matchColumn, config.columnMap, dryRun, virtualCols);
 
     var logTab = dryRun ? 'Dry Run - Import' : 'Last Import';
     var old = configSs.getSheetByName(logTab);
@@ -128,7 +129,8 @@ function runPushToSheet_(dryRun) {
 
     var targetCols  = config.columnMap.map(function (m) { return m.target; });
     var addResult   = addColumnsToTarget_(userSheet, targetCols, dryRun);
-    var mergeResult = mergeIntoTarget_(userSheet, sourceLookup, config.matchColumn, config.columnMap, dryRun);
+    var virtualCols = addResult.added.map(function (a) { return a.column; });
+    var mergeResult = mergeIntoTarget_(userSheet, sourceLookup, config.matchColumn, config.columnMap, dryRun, virtualCols);
 
     var logTab = dryRun ? 'Dry Run - Push User Sheet' : 'Last Push - User Sheet';
     var old = configSs.getSheetByName(logTab);
@@ -199,7 +201,8 @@ function runPushToFolder_(dryRun) {
         var sheet = ss.getSheets()[0];
 
         var addResult   = addColumnsToTarget_(sheet, targetCols, dryRun);
-        var mergeResult = mergeIntoTarget_(sheet, sourceLookup, config.matchColumn, config.columnMap, dryRun);
+        var virtualCols = addResult.added.map(function (a) { return a.column; });
+        var mergeResult = mergeIntoTarget_(sheet, sourceLookup, config.matchColumn, config.columnMap, dryRun, virtualCols);
 
         appendToSyncLog_(configSs, logTab, fileName, addResult, mergeResult);
         totalCols      += addResult.added.length;
