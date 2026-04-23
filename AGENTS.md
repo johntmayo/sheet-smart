@@ -26,6 +26,7 @@ The script scans every spreadsheet in a Drive folder, reads the master spreadshe
   - `countTrueInColumn_` — counts cells that are strictly `=== true`. Used for checkbox columns (Address - For Sale, Address - Sold Since Fire) because unchecked checkboxes return `false`, not blank.
   - `countUniqueAddressesMissingApn_` — counts unique Address values where the APN cell is blank.
 - **Config at the top.** `FOLDER_ID` and `MASTER_SPREADSHEET_ID` are constants at the top of `Code.gs`. Never hardcode sheet IDs elsewhere.
+- **Zone detection.** The Phase 1 audit infers each user sheet's assigned zone by taking the mode of its `ZoneName` column (via `detectSheetZone_`). There is no separate zone roster to maintain — each user sheet's own data is the source of truth for which zone it represents.
 - **Error handling.** If a sheet can't be opened, push an ERROR row to the overview and continue. Never let one bad sheet kill the whole run.
 
 ## Phase Plan
@@ -44,15 +45,20 @@ The config spreadsheet holds:
 - **Settings** — Master Spreadsheet, External Source, User Sheet, User Sheets Folder, Match Column, and rename keys (`Rename Column - From`, `Rename Column - To`).
 - **Column Mapping** — Source Column → Target Column pairs for aligning columns between source and targets.
 
-**Three sync operations (each automatically adds missing columns then fills data):**
+**Three cell-fill sync operations (each automatically adds missing columns then fills blank cells):**
 
 1. **Import → Master** — external source spreadsheet → master (by match column).
 2. **Push → User Sheet** — master → a single user spreadsheet.
 3. **Push → User Sheets Folder** — master → every spreadsheet in the configured folder.
 
+**Two row-append operations (append whole new rows; never modify or remove existing rows):**
+
+4. **Push Missing Rows → User Sheet** — for a single user sheet, appends master rows whose `ZoneName` matches the sheet's detected zone and whose `resident_id` isn't already present. Columns on new rows are populated by header-name join.
+5. **Push Missing Rows → User Sheets Folder** — same as above, across every spreadsheet in the configured folder.
+
 **One schema operation (header-only):**
 
-4. **Rename Columns → User Sheets Folder** — renames one header across every spreadsheet in the configured folder (row 1 only; data rows untouched).
+6. **Rename Columns → User Sheets Folder** — renames one header across every spreadsheet in the configured folder (row 1 only; data rows untouched).
 
 A final menu item, **Set Up Config Tabs**, initializes the Settings and Column Mapping tabs with labels and instructions.
 
@@ -60,13 +66,17 @@ A final menu item, **Set Up Config Tabs**, initializes the Settings and Column M
 - Import → Master: `External Source`, `Master Spreadsheet`, `Match Column`
 - Push → User Sheet: `Master Spreadsheet`, `User Sheet`, `Match Column`
 - Push → User Sheets Folder: `Master Spreadsheet`, `User Sheets Folder`, `Match Column`
+- Push Missing Rows → User Sheet: `Master Spreadsheet`, `User Sheet`, `Sensitive Columns`
+- Push Missing Rows → User Sheets Folder: `Master Spreadsheet`, `User Sheets Folder`, `Sensitive Columns`
 - Rename Columns → User Sheets Folder: `User Sheets Folder`, `Rename Column - From`, `Rename Column - To`
 
 Each operation reads only its own settings; unused settings are ignored.
 
-**Write policy (Option D):** fill blank cells only; when a cell already has a value that differs from the incoming value, **do not overwrite** — record it as a conflict for manual review. Never silently overwrite non-blank disagreements.
+**Write policy (Option D):** cell-fill operations only fill blank cells; when a cell already has a value that differs from the incoming value, **do not overwrite** — record it as a conflict for manual review. Never silently overwrite non-blank disagreements. Row-append operations only append new rows at the bottom and never modify or remove existing rows.
 
-**Outputs:** run summaries, metrics, and operation logs are written to **tabs on the same config spreadsheet** (`Last Import`, `Last Push - User Sheet`, `Last Push - Folder`, `Last Rename - Folder`, and dry-run variants).
+**Sensitive column flagging (Push Missing Rows):** if a master row being appended has a non-blank value in any column listed under `Sensitive Columns`, the row is still appended, but also logged to the `Flagged - Sensitive Data` tab so the admin can confirm it's okay to share that data with the receiving captain. The push is never blocked — this is informational.
+
+**Outputs:** run summaries, metrics, and operation logs are written to **tabs on the same config spreadsheet** (`Last Import`, `Last Push - User Sheet`, `Last Push - Folder`, `Last Push - Missing Rows`, `Flagged - Sensitive Data`, `Last Rename - Folder`, and dry-run variants).
 
 **UI:** `SpreadsheetApp.getUi()` and other container-bound APIs **are** used in `Corrections.gs` because the script is bound to the config spreadsheet. That restriction applies only to the **standalone** Phase 1 audit (`Code.gs`).
 

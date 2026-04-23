@@ -43,15 +43,31 @@ function readMergeConfig_(configSpreadsheet) {
   }
 
   return {
-    masterId:     settings['Master Spreadsheet'] || '',
-    sourceId:     settings['External Source'] || settings['Source Spreadsheet'] || '',
-    userSheetId:  settings['User Sheet'] || '',
-    folderId:     settings['User Sheets Folder'] || settings['Target Folder'] || '',
-    matchColumn:  settings['Match Column'] || '',
-    renameFrom:   settings['Rename Column - From'] || '',
-    renameTo:     settings['Rename Column - To'] || '',
-    columnMap:    columnMap
+    masterId:         settings['Master Spreadsheet'] || '',
+    sourceId:         settings['External Source'] || settings['Source Spreadsheet'] || '',
+    userSheetId:      settings['User Sheet'] || '',
+    folderId:         settings['User Sheets Folder'] || settings['Target Folder'] || '',
+    matchColumn:      settings['Match Column'] || '',
+    renameFrom:       settings['Rename Column - From'] || '',
+    renameTo:         settings['Rename Column - To'] || '',
+    columnMap:        columnMap,
+    sensitiveColumns: parseSensitiveColumns_(settings['Sensitive Columns'] || '')
   };
+}
+
+/**
+ * Parses the "Sensitive Columns" setting value (a comma-separated list
+ * of column headers) into a trimmed array of header names. Blank
+ * entries are removed.
+ *
+ * @param {string} raw
+ * @return {Array<string>}
+ */
+function parseSensitiveColumns_(raw) {
+  if (!raw) return [];
+  return String(raw).split(',')
+    .map(function (s) { return s.trim(); })
+    .filter(function (s) { return s !== ''; });
 }
 
 /**
@@ -527,4 +543,238 @@ function appendToRenameLog_(spreadsheet, tabName, sheetName, oldHeader, newHeade
   tab.getRange(tab.getLastRow() + 1, 1, 1, header.length).setValues([
     [rowType, sheetName, oldHeader, newHeader, note]
   ]);
+}
+
+/**
+ * Appends rows from master into a target user sheet for residents whose
+ * ZoneName matches the target's detected zone but whose resident_id
+ * isn't already present in the target. The target's assigned zone is
+ * inferred by taking the most common non-blank value in its ZoneName
+ * column (same approach as the Phase 1 audit).
+ *
+ * Column values on the new rows are populated by header-name join:
+ * every column where the target header exactly matches a master header
+ * is filled from master. Columns present in the target but absent in
+ * master are left blank on the new rows.
+ *
+ * Pure addition. Existing rows are never modified, and rows are never
+ * removed. Duplicate resident_ids in master for the same zone are
+ * appended once (the first occurrence wins); on subsequent runs, the
+ * resident_id will already exist in the target and be skipped.
+ *
+ * @param {SpreadsheetApp.Sheet} targetSheet
+ * @param {Array<Array>} masterData            Full 2D array of master, including header row
+ * @param {Array<string>} masterHeaders        Trimmed master header row
+ * @param {Array<string>} sensitiveColumns     Column headers considered privacy-sensitive
+ * @param {boolean} dryRun                     If true, compute only — never write
+ * @return {{ appended: Array, flagged: Array, errors: Array, detectedZone: string }}
+ */
+function appendMissingRowsToSheet_(targetSheet, masterData, masterHeaders, sensitiveColumns, dryRun) {
+  var result = {
+    appended: [],
+    flagged: [],
+    errors: [],
+    detectedZone: ''
+  };
+
+  var targetData = targetSheet.getDataRange().getValues();
+  if (targetData.length === 0) {
+    result.errors.push({ message: 'Target sheet is empty (no header row)' });
+    return result;
+  }
+
+  var targetHeaders = targetData[0].map(function (h) { return String(h).trim(); });
+  var targetZoneCol = targetHeaders.indexOf('ZoneName');
+  var targetIdCol = targetHeaders.indexOf('resident_id');
+
+  if (targetZoneCol === -1) {
+    result.errors.push({ message: 'Target sheet has no ZoneName column' });
+    return result;
+  }
+  if (targetIdCol === -1) {
+    result.errors.push({ message: 'Target sheet has no resident_id column' });
+    return result;
+  }
+
+  var existing = {};
+  var zoneCounts = {};
+  for (var r = 1; r < targetData.length; r++) {
+    var row = targetData[r];
+
+    var id = String(row[targetIdCol] || '').trim();
+    if (id !== '' && id !== 'undefined' && id !== 'null') {
+      existing[id] = true;
+    }
+
+    var zv = String(row[targetZoneCol] || '').trim();
+    if (zv !== '') zoneCounts[zv] = (zoneCounts[zv] || 0) + 1;
+  }
+
+  var detectedZone = '';
+  var topCount = 0;
+  Object.keys(zoneCounts).forEach(function (z) {
+    if (zoneCounts[z] > topCount) {
+      detectedZone = z;
+      topCount = zoneCounts[z];
+    }
+  });
+  if (detectedZone === '') {
+    result.errors.push({ message: 'No zone detected (ZoneName column has no non-blank values)' });
+    return result;
+  }
+  result.detectedZone = detectedZone;
+
+  var masterIdCol = masterHeaders.indexOf('resident_id');
+  var masterZoneCol = masterHeaders.indexOf('ZoneName');
+  var masterNameCol = masterHeaders.indexOf('Resident Name');
+  if (masterIdCol === -1) {
+    result.errors.push({ message: 'Master has no resident_id column' });
+    return result;
+  }
+  if (masterZoneCol === -1) {
+    result.errors.push({ message: 'Master has no ZoneName column' });
+    return result;
+  }
+
+  // Header-name join: target column index -> master column index (or -1 if
+  // the target column has no matching master header).
+  var colMap = [];
+  for (var tc = 0; tc < targetHeaders.length; tc++) {
+    var h = targetHeaders[tc];
+    colMap.push(h === '' ? -1 : masterHeaders.indexOf(h));
+  }
+
+  var sensitiveMasterCols = [];
+  var sensitiveColumnNames = [];
+  for (var s = 0; s < sensitiveColumns.length; s++) {
+    var sName = String(sensitiveColumns[s]).trim();
+    if (sName === '') continue;
+    var sIdx = masterHeaders.indexOf(sName);
+    if (sIdx !== -1) {
+      sensitiveMasterCols.push(sIdx);
+      sensitiveColumnNames.push(sName);
+    }
+  }
+
+  var newRows = [];
+  for (var mr = 1; mr < masterData.length; mr++) {
+    var masterRow = masterData[mr];
+    var masterId = String(masterRow[masterIdCol] || '').trim();
+    if (masterId === '' || masterId === 'undefined' || masterId === 'null') continue;
+
+    var masterZone = String(masterRow[masterZoneCol] || '').trim();
+    if (masterZone !== detectedZone) continue;
+    if (existing[masterId]) continue;
+
+    var newRow = [];
+    for (var c = 0; c < targetHeaders.length; c++) {
+      var src = colMap[c];
+      newRow.push(src === -1 ? '' : masterRow[src]);
+    }
+
+    var residentName = (masterNameCol !== -1) ? String(masterRow[masterNameCol] || '').trim() : '';
+
+    var flaggedCols = [];
+    for (var sc = 0; sc < sensitiveMasterCols.length; sc++) {
+      var sv = masterRow[sensitiveMasterCols[sc]];
+      if (sv !== '' && sv !== null && sv !== undefined) {
+        flaggedCols.push(sensitiveColumnNames[sc]);
+      }
+    }
+
+    result.appended.push({
+      residentId: masterId,
+      residentName: residentName,
+      masterRow: mr + 1
+    });
+
+    if (flaggedCols.length > 0) {
+      result.flagged.push({
+        residentId: masterId,
+        residentName: residentName,
+        flaggedColumns: flaggedCols.join(', ')
+      });
+    }
+
+    newRows.push(newRow);
+
+    // Guard against duplicate master rows with the same resident_id in the
+    // same zone — first occurrence wins for this run.
+    existing[masterId] = true;
+  }
+
+  if (!dryRun && newRows.length > 0) {
+    var startRow = targetSheet.getLastRow() + 1;
+    targetSheet.getRange(startRow, 1, newRows.length, targetHeaders.length).setValues(newRows);
+  }
+
+  return result;
+}
+
+/**
+ * Appends rows-appended results to a log tab, creating the tab with
+ * a header row on first write. Errors are recorded inline.
+ *
+ * @param {SpreadsheetApp.Spreadsheet} spreadsheet
+ * @param {string} tabName
+ * @param {string} sheetName
+ * @param {string} detectedZone
+ * @param {{ appended: Array, flagged: Array, errors: Array, detectedZone: string }} result
+ */
+function appendToMissingRowsLog_(spreadsheet, tabName, sheetName, detectedZone, result) {
+  var tab = spreadsheet.getSheetByName(tabName);
+  var header = ['Spreadsheet', 'Detected Zone', 'resident_id', 'Resident Name', 'Master Row #', 'Status'];
+  if (!tab) {
+    tab = spreadsheet.insertSheet(tabName);
+    tab.getRange(1, 1, 1, header.length).setValues([header]);
+    formatHeaderRow_(tab, header.length);
+    tab.setFrozenRows(1);
+  }
+
+  var newRows = [];
+  for (var i = 0; i < result.appended.length; i++) {
+    var a = result.appended[i];
+    newRows.push([sheetName, detectedZone, a.residentId, a.residentName, a.masterRow, 'Appended']);
+  }
+  for (var j = 0; j < result.errors.length; j++) {
+    newRows.push([sheetName, detectedZone || '(none)', '', '', '', 'Error: ' + result.errors[j].message]);
+  }
+
+  if (newRows.length > 0) {
+    var startRow = tab.getLastRow() + 1;
+    tab.getRange(startRow, 1, newRows.length, header.length).setValues(newRows);
+  }
+}
+
+/**
+ * Appends flagged-sensitive-data entries to a log tab, creating the
+ * tab with a header row on first write. Only rows that had a non-blank
+ * value in at least one sensitive column are written here.
+ *
+ * @param {SpreadsheetApp.Spreadsheet} spreadsheet
+ * @param {string} tabName
+ * @param {string} sheetName
+ * @param {string} detectedZone
+ * @param {{ flagged: Array }} result
+ */
+function appendToFlaggedSensitiveLog_(spreadsheet, tabName, sheetName, detectedZone, result) {
+  var tab = spreadsheet.getSheetByName(tabName);
+  var header = ['Spreadsheet', 'Detected Zone', 'resident_id', 'Resident Name', 'Flagged Columns'];
+  if (!tab) {
+    tab = spreadsheet.insertSheet(tabName);
+    tab.getRange(1, 1, 1, header.length).setValues([header]);
+    formatHeaderRow_(tab, header.length);
+    tab.setFrozenRows(1);
+  }
+
+  var newRows = [];
+  for (var i = 0; i < result.flagged.length; i++) {
+    var f = result.flagged[i];
+    newRows.push([sheetName, detectedZone, f.residentId, f.residentName, f.flaggedColumns]);
+  }
+
+  if (newRows.length > 0) {
+    var startRow = tab.getLastRow() + 1;
+    tab.getRange(startRow, 1, newRows.length, header.length).setValues(newRows);
+  }
 }

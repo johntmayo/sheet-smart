@@ -2,16 +2,26 @@
 // Corrections.gs — UI & Entry Points for Sheet Smart
 // ============================================================
 // Container-bound script inside the "Sheet Smart Config"
-// spreadsheet. Provides a custom menu with nine actions:
+// spreadsheet. Provides a custom menu with these actions:
 //
 //   Import → Master              bring data INTO the master from
 //                                an external source spreadsheet
 //
 //   Push → User Sheet            push data FROM the master into
 //                                a single user spreadsheet
+//                                (fills blank cells in existing rows)
 //
 //   Push → User Sheets Folder    push data FROM the master into
 //                                every sheet in a Drive folder
+//                                (fills blank cells in existing rows)
+//
+//   Push Missing Rows → User Sheet
+//                                append rows from master whose
+//                                ZoneName matches the sheet's zone
+//                                and whose resident_id isn't present
+//
+//   Push Missing Rows → User Sheets Folder
+//                                same, across every sheet in a folder
 //
 //   Rename Columns → Folder      rename one header across every
 //                                sheet in a Drive folder
@@ -19,8 +29,9 @@
 //   Set Up Config Tabs           format Settings & Column Mapping
 //                                with labels and instructions
 //
-// Each operation automatically adds any missing target columns
-// before filling data. All heavy lifting is in MergeEngine.gs.
+// Cell-fill operations automatically add any missing target columns
+// before filling. Row-append operations never modify or remove
+// existing rows. All heavy lifting is in MergeEngine.gs.
 // ============================================================
 
 /**
@@ -38,6 +49,12 @@ function onOpen() {
     .addSeparator()
     .addItem('Push → User Sheets Folder', 'pushToFolder')
     .addItem('Push → User Sheets Folder (Dry Run)', 'pushToFolderDryRun')
+    .addSeparator()
+    .addItem('Push Missing Rows → User Sheet', 'pushMissingRowsToUserSheet')
+    .addItem('Push Missing Rows → User Sheet (Dry Run)', 'pushMissingRowsToUserSheetDryRun')
+    .addSeparator()
+    .addItem('Push Missing Rows → User Sheets Folder', 'pushMissingRowsToFolder')
+    .addItem('Push Missing Rows → User Sheets Folder (Dry Run)', 'pushMissingRowsToFolderDryRun')
     .addSeparator()
     .addItem('Rename Columns → User Sheets Folder', 'renameColumnsInFolder')
     .addItem('Rename Columns → User Sheets Folder (Dry Run)', 'renameColumnsInFolderDryRun')
@@ -239,6 +256,139 @@ function runPushToFolder_(dryRun) {
   }
 }
 
+// -------  Push Missing Rows → User Sheet  -------
+//
+// For a single user sheet: detects its zone (mode of the ZoneName
+// column), finds master rows whose ZoneName matches the detected
+// zone, and appends the ones whose resident_id isn't already in the
+// sheet. Columns are filled by header-name join from master.
+//
+// Rows whose master record has a non-blank value in any column listed
+// under "Sensitive Columns" in Settings are still appended, but also
+// recorded in the "Flagged - Sensitive Data" log tab for admin review.
+
+function pushMissingRowsToUserSheet()       { runPushMissingRowsToSheet_(false); }
+function pushMissingRowsToUserSheetDryRun() { runPushMissingRowsToSheet_(true);  }
+
+function runPushMissingRowsToSheet_(dryRun) {
+  var ui = SpreadsheetApp.getUi();
+  try {
+    var configSs = SpreadsheetApp.getActiveSpreadsheet();
+    var config   = readMergeConfig_(configSs);
+
+    if (!config.masterId)    throw new Error('Master Spreadsheet is not set in the Settings tab.');
+    if (!config.userSheetId) throw new Error('User Sheet is not set in the Settings tab.');
+
+    var masterSs    = SpreadsheetApp.openById(config.masterId);
+    var masterSheet = masterSs.getSheets()[0];
+    var masterData  = masterSheet.getDataRange().getValues();
+    var masterHdrs  = masterData[0].map(function (h) { return String(h).trim(); });
+
+    var userSs    = SpreadsheetApp.openById(config.userSheetId);
+    var userSheet = userSs.getSheets()[0];
+
+    var appendLogTab = dryRun ? 'Dry Run - Push Missing Rows' : 'Last Push - Missing Rows';
+    var flagLogTab   = dryRun ? 'Dry Run - Flagged Sensitive Data' : 'Flagged - Sensitive Data';
+    var oldA = configSs.getSheetByName(appendLogTab); if (oldA) configSs.deleteSheet(oldA);
+    var oldF = configSs.getSheetByName(flagLogTab);   if (oldF) configSs.deleteSheet(oldF);
+
+    var result = appendMissingRowsToSheet_(userSheet, masterData, masterHdrs, config.sensitiveColumns, dryRun);
+    appendToMissingRowsLog_(configSs, appendLogTab, userSs.getName(), result.detectedZone, result);
+    if (result.flagged.length > 0) {
+      appendToFlaggedSensitiveLog_(configSs, flagLogTab, userSs.getName(), result.detectedZone, result);
+    }
+
+    var prefix = dryRun ? 'DRY RUN — Push Missing Rows → User Sheet\n\n' : 'Push Missing Rows → User Sheet complete.\n\n';
+    ui.alert(
+      prefix +
+      'Detected zone: '                      + (result.detectedZone || '(none)') + '\n' +
+      'Rows appended: '                      + result.appended.length + '\n' +
+      'Flagged (sensitive data present): '   + result.flagged.length + '\n' +
+      'Errors: '                             + result.errors.length + '\n\n' +
+      'See the "' + appendLogTab + '" tab' +
+      (result.flagged.length > 0 ? ' and "' + flagLogTab + '" tab' : '') + '.'
+    );
+  } catch (e) {
+    ui.alert('Push Missing Rows → User Sheet failed:\n\n' + e.message);
+  }
+}
+
+// -------  Push Missing Rows → User Sheets Folder  -------
+//
+// Same as above but iterates every sheet in the configured folder.
+// Each sheet's zone is detected independently. Results for all
+// sheets accumulate into one "Last Push - Missing Rows" log tab
+// and one "Flagged - Sensitive Data" log tab.
+
+function pushMissingRowsToFolder()       { runPushMissingRowsToFolder_(false); }
+function pushMissingRowsToFolderDryRun() { runPushMissingRowsToFolder_(true);  }
+
+function runPushMissingRowsToFolder_(dryRun) {
+  var ui = SpreadsheetApp.getUi();
+  try {
+    var configSs = SpreadsheetApp.getActiveSpreadsheet();
+    var config   = readMergeConfig_(configSs);
+
+    if (!config.masterId) throw new Error('Master Spreadsheet is not set in the Settings tab.');
+    if (!config.folderId) throw new Error('User Sheets Folder is not set in the Settings tab.');
+
+    var masterSs    = SpreadsheetApp.openById(config.masterId);
+    var masterSheet = masterSs.getSheets()[0];
+    var masterData  = masterSheet.getDataRange().getValues();
+    var masterHdrs  = masterData[0].map(function (h) { return String(h).trim(); });
+
+    var folder = DriveApp.getFolderById(config.folderId);
+    var iter   = folder.getFilesByType(MimeType.GOOGLE_SHEETS);
+    var files  = [];
+    while (iter.hasNext()) files.push(iter.next());
+    files.sort(function (a, b) { return a.getName().localeCompare(b.getName()); });
+
+    var appendLogTab = dryRun ? 'Dry Run - Push Missing Rows' : 'Last Push - Missing Rows';
+    var flagLogTab   = dryRun ? 'Dry Run - Flagged Sensitive Data' : 'Flagged - Sensitive Data';
+    var oldA = configSs.getSheetByName(appendLogTab); if (oldA) configSs.deleteSheet(oldA);
+    var oldF = configSs.getSheetByName(flagLogTab);   if (oldF) configSs.deleteSheet(oldF);
+
+    var totalAppended = 0, totalFlagged = 0, totalErrors = 0;
+
+    for (var i = 0; i < files.length; i++) {
+      var file     = files[i];
+      var fileName = file.getName();
+      try {
+        var ss     = SpreadsheetApp.openById(file.getId());
+        var sheet  = ss.getSheets()[0];
+        var result = appendMissingRowsToSheet_(sheet, masterData, masterHdrs, config.sensitiveColumns, dryRun);
+
+        appendToMissingRowsLog_(configSs, appendLogTab, fileName, result.detectedZone, result);
+        if (result.flagged.length > 0) {
+          appendToFlaggedSensitiveLog_(configSs, flagLogTab, fileName, result.detectedZone, result);
+        }
+
+        totalAppended += result.appended.length;
+        totalFlagged  += result.flagged.length;
+        totalErrors   += result.errors.length;
+      } catch (e) {
+        appendToMissingRowsLog_(configSs, appendLogTab, fileName, '', {
+          appended: [], flagged: [], errors: [{ message: e.message }], detectedZone: ''
+        });
+        totalErrors++;
+      }
+    }
+
+    var prefix = dryRun ? 'DRY RUN — Push Missing Rows → Folder\n\n' : 'Push Missing Rows → Folder complete.\n\n';
+    ui.alert(
+      prefix +
+      'Sheets processed: '                   + files.length + '\n' +
+      'Total rows appended: '                + totalAppended + '\n' +
+      'Flagged (sensitive data present): '   + totalFlagged + '\n' +
+      'Errors: '                             + totalErrors + '\n\n' +
+      'See the "' + appendLogTab + '" tab' +
+      (totalFlagged > 0 ? ' and "' + flagLogTab + '" tab' : '') + '.'
+    );
+  } catch (e) {
+    ui.alert('Push Missing Rows → Folder failed:\n\n' + e.message);
+  }
+}
+
 // -------  Rename Columns → User Sheets Folder  -------
 //
 // Renames a single header across every Google Sheet in the
@@ -409,6 +559,15 @@ function setupSettingsTab_(ss) {
       existingValues['Rename Column - To'] || '',
       'For "Rename Columns → User Sheets Folder": the new header name to write. ' +
       'If this header already exists in a sheet, that sheet is skipped and logged.'
+    ],
+    [
+      'Sensitive Columns',
+      existingValues['Sensitive Columns'] || '',
+      'Comma-separated list of column headers whose values are considered privacy-sensitive ' +
+      '(e.g. "Person Notes, Contact Notes, Address Notes"). Only used by the "Push Missing Rows" ' +
+      'operations. When a missing row is appended to a user sheet and any of these columns has ' +
+      'a value in master, the row is listed in the "Flagged - Sensitive Data" log tab for you ' +
+      'to review. The row is still appended — this flag is informational.'
     ]
   ];
 
