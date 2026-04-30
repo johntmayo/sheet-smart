@@ -1,6 +1,6 @@
 # Sheet Smart — How to Use
 
-Google Apps Script tooling for auditing and correcting ~55 Google Spreadsheets derived from a single master. Two independent tools: a **Phase 1 audit script** and a **Phase 2 sync tool**.
+Google Apps Script tooling for auditing and correcting ~55 Google Spreadsheets derived from a single master. Two independent tools: a **Phase 1 audit script** (`Code.gs`) and a **Phase 2 sync tool** (`MergeEngine.gs` + `Corrections.gs` in a config spreadsheet).
 
 ---
 

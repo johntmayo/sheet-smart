@@ -450,8 +450,18 @@ function columnLetter_(index) {
   return letter;
 }
 
+/**
+ * Spreadsheet title for new audit reports: date + time in the script timezone.
+ */
+function auditReportTitle_() {
+  var tz = Session.getScriptTimeZone();
+  if (!tz) tz = 'UTC';
+  var stamp = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd HH-mm-ss');
+  return 'Sheet Scan — Audit Report — ' + stamp;
+}
+
 function writeReport_(masterHeaders, overviewRows, detailRows, duplicateRows, missingRowsAll, extraRowsAll) {
-  var report = SpreadsheetApp.create('Sheet Scan — Audit Report');
+  var report = SpreadsheetApp.create(auditReportTitle_());
 
   // --- Tab 1: Overview ---
   var overviewSheet = report.getSheets()[0].setName('Overview');

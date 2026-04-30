@@ -4,7 +4,7 @@ Google Apps Script tooling for auditing and correcting ~55 Google Spreadsheets t
 
 ## Project Structure
 
-- `Code.gs` — standalone Apps Script (paste into script.google.com, not bound to a sheet)
+- `Code.gs` — standalone Apps Script (paste into script.google.com, not bound to a sheet); `runAudit()` = folder scan + six-tab report
 - `MergeEngine.gs` — Phase 2 merge logic (container-bound; see Phase 2 architecture)
 - `Corrections.gs` — Phase 2 custom menu / UI (container-bound)
 - `PRD.md` — product requirements document (the "why" and "what")
@@ -13,7 +13,7 @@ Google Apps Script tooling for auditing and correcting ~55 Google Spreadsheets t
 
 ## How It Works
 
-The script scans every spreadsheet in a Drive folder, reads the master spreadsheet's header row as the canonical column list, and compares each sheet against it. Output is a new Google Spreadsheet with three tabs: Overview, Column Detail, and Master Columns.
+The Phase 1 audit script scans every spreadsheet in a Drive folder, reads the master spreadsheet's header row as the canonical column list, and compares each sheet against it. Output is a new Google Spreadsheet with six tabs (Overview, Column Detail, Master Columns, Duplicate Resident IDs, Missing Rows, Extra Rows).
 
 ## Key Conventions
 
