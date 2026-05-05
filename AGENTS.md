@@ -44,6 +44,7 @@ The config spreadsheet holds:
 
 - **Settings** — Master Spreadsheet, External Source, User Sheet, User Sheets Folder, Match Column, and rename keys (`Rename Column - From`, `Rename Column - To`).
 - **Column Mapping** — Source Column → Target Column pairs for aligning columns between source and targets.
+- **Pull Column Policy** — Column Name → Policy rows for Pull Data into master (`fill_blank`, `overwrite`, `conflict`, `never`).
 
 **Three cell-fill sync operations (each automatically adds missing columns then fills blank cells):**
 
@@ -56,9 +57,19 @@ The config spreadsheet holds:
 4. **Push Missing Rows → User Sheet** — for a single user sheet, appends master rows whose `ZoneName` matches the sheet's detected zone and whose `resident_id` isn't already present. Columns on new rows are populated by header-name join.
 5. **Push Missing Rows → User Sheets Folder** — same as above, across every spreadsheet in the configured folder.
 
+**Two pull row-append operations (append captain-created rows into master; never modify or remove existing rows):**
+
+6. **Pull Missing Rows ← User Sheet** — for a single user sheet, appends rows whose `resident_id` is not already present in master. User-sheet columns missing from master are added to master first.
+7. **Pull Missing Rows ← User Sheets Folder** — same as above, across every spreadsheet in the configured folder. Duplicate `resident_id` values encountered after the first source row are skipped and logged.
+
+**Two pull-data operations (import captain-entered values into master by policy):**
+
+8. **Pull Data ← User Sheet** — for a single user sheet, updates existing master rows by `resident_id` using Pull Column Policy, adds source-only headers to master, and appends rows absent from master.
+9. **Pull Data ← User Sheets Folder** — same as above, across every spreadsheet in the configured folder. Duplicate `resident_id` values encountered after the first source row are skipped and logged.
+
 **One schema operation (header-only):**
 
-6. **Rename Columns → User Sheets Folder** — renames one header across every spreadsheet in the configured folder (row 1 only; data rows untouched).
+10. **Rename Columns → User Sheets Folder** — renames one header across every spreadsheet in the configured folder (row 1 only; data rows untouched).
 
 A final menu item, **Set Up Config Tabs**, initializes the Settings and Column Mapping tabs with labels and instructions.
 
@@ -68,15 +79,21 @@ A final menu item, **Set Up Config Tabs**, initializes the Settings and Column M
 - Push → User Sheets Folder: `Master Spreadsheet`, `User Sheets Folder`, `Match Column`
 - Push Missing Rows → User Sheet: `Master Spreadsheet`, `User Sheet`, `Sensitive Columns`
 - Push Missing Rows → User Sheets Folder: `Master Spreadsheet`, `User Sheets Folder`, `Sensitive Columns`
+- Pull Missing Rows ← User Sheet: `Master Spreadsheet`, `User Sheet`
+- Pull Missing Rows ← User Sheets Folder: `Master Spreadsheet`, `User Sheets Folder`
+- Pull Data ← User Sheet: `Master Spreadsheet`, `User Sheet`, `Pull Column Policy`
+- Pull Data ← User Sheets Folder: `Master Spreadsheet`, `User Sheets Folder`, `Pull Column Policy`
 - Rename Columns → User Sheets Folder: `User Sheets Folder`, `Rename Column - From`, `Rename Column - To`
 
 Each operation reads only its own settings; unused settings are ignored.
 
-**Write policy (Option D):** cell-fill operations only fill blank cells; when a cell already has a value that differs from the incoming value, **do not overwrite** — record it as a conflict for manual review. Never silently overwrite non-blank disagreements. Row-append operations only append new rows at the bottom and never modify or remove existing rows.
+**Write policy (Option D):** cell-fill operations only fill blank cells; when a cell already has a value that differs from the incoming value, **do not overwrite** — record it as a conflict for manual review. Never silently overwrite non-blank disagreements. Row-append operations only append new rows at the bottom and never modify or remove existing rows. Pull Missing Rows uses `resident_id` as the identity key and appends only rows absent from master. Pull Data is the exception that can overwrite existing master cells, but only for columns explicitly marked `overwrite` in Pull Column Policy.
+
+**Pull Data policies:** `fill_blank` writes captain values only into blank master cells; `overwrite` replaces non-blank master values with non-blank captain values; `conflict` logs differences without writing; `never` skips the column entirely. Unlisted columns default to `conflict`, and `resident_id` is always forced to `never`.
 
 **Sensitive column flagging (Push Missing Rows):** if a master row being appended has a non-blank value in any column listed under `Sensitive Columns`, the row is still appended, but also logged to the `Flagged - Sensitive Data` tab so the admin can confirm it's okay to share that data with the receiving captain. The push is never blocked — this is informational.
 
-**Outputs:** run summaries, metrics, and operation logs are written to **tabs on the same config spreadsheet** (`Last Import`, `Last Push - User Sheet`, `Last Push - Folder`, `Last Push - Missing Rows`, `Flagged - Sensitive Data`, `Last Rename - Folder`, and dry-run variants).
+**Outputs:** run summaries, metrics, and operation logs are written to **tabs on the same config spreadsheet** (`Last Import`, `Last Push - User Sheet`, `Last Push - Folder`, `Last Push - Missing Rows`, `Flagged - Sensitive Data`, `Last Pull - Missing Rows`, `Last Pull Data`, `Last Rename - Folder`, and dry-run variants).
 
 **UI:** `SpreadsheetApp.getUi()` and other container-bound APIs **are** used in `Corrections.gs` because the script is bound to the config spreadsheet. That restriction applies only to the **standalone** Phase 1 audit (`Code.gs`).
 

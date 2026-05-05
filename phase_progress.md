@@ -24,39 +24,55 @@
 
 **Status:** In progress
 
-**Goal:** A multi-operation data integration tool — import new data into the master, push data from the master out to the ~55 user sheets, add missing columns during sync, and support safe folder-wide column-header renames.
+**Goal:** A multi-operation data integration tool — import new data into the master, push data from the master out to the ~55 user sheets, pull captain-created rows and updates back into the master, add missing columns during sync, and support safe folder-wide column-header renames.
 
-**Interface:** Container-bound Apps Script inside a "Sheet Smart Config" Google Spreadsheet. Custom menu: `Sheet Smart` with nine actions.
+**Interface:** Container-bound Apps Script inside a "Sheet Smart Config" Google Spreadsheet. Custom menu: `Sheet Smart` with row, cell-fill, and schema actions plus dry-run variants, plus a guided sidebar dashboard for task-oriented workflows.
 
 **Config spreadsheet layout:**
-- **Settings tab:** Source Spreadsheet ID, Match Column (usually APN), Target Folder ID, Master Spreadsheet ID
+- **Settings tab:** Source Spreadsheet ID, optional Source Tab Name, Match Column (usually APN), Target Folder ID, Master Spreadsheet ID
 - **Column Mapping tab:** Source Column | Target Column (one row per column to merge or add)
+- **Workflow Presets tab:** named sidebar workflows with operation type, source/destination IDs, source tab, match column, and mappings
 
 **Architecture (two .gs files, same Apps Script project):**
 - `MergeEngine.gs` — core engine: `readMergeConfig_`, `buildSourceLookup_`, `mergeIntoTarget_`, `addColumnsToTarget_`, `appendToSyncLog_`, and supporting helpers
-- `Corrections.gs` — UI layer: `onOpen` menu, sync entry points and dry-run wrappers, `setupConfigTabs`
+- `Corrections.gs` — UI layer: `onOpen` menu, sidebar entry points, sync entry points and dry-run wrappers, `setupConfigTabs`
+- `Sidebar.html` — guided dashboard UI for workflow presets
 
 **Menu actions (`Sheet Smart` menu):**
+- **Open Dashboard** — guided sidebar for named workflows. First supported workflow: **Update Master From Sales Tracker**.
 - **Import → Master** / **(Dry Run)** — External Source → Master; adds missing columns first, then fills blank cells; conflicts logged
 - **Push → User Sheet** / **(Dry Run)** — Master → single user spreadsheet; adds missing columns first, then fills blank cells; conflicts logged
 - **Push → User Sheets Folder** / **(Dry Run)** — Master → all sheets in folder; adds missing columns first, then fills blank cells; conflicts logged
+- **Push Missing Rows → User Sheet** / **(Dry Run)** — Master → single user spreadsheet; appends missing residents for the sheet's detected zone
+- **Push Missing Rows → User Sheets Folder** / **(Dry Run)** — Master → all sheets in folder; appends missing residents by detected zone
+- **Pull Missing Rows ← User Sheet** / **(Dry Run)** — single user spreadsheet → Master; appends rows whose `resident_id` is absent from master and adds source-only headers to master first
+- **Pull Missing Rows ← User Sheets Folder** / **(Dry Run)** — all sheets in folder → Master; same as above, skipping duplicate `resident_id` values after the first occurrence
+- **Pull Data ← User Sheet** / **(Dry Run)** — single user spreadsheet → Master; updates existing rows by `resident_id` using Pull Column Policy and appends rows absent from master
+- **Pull Data ← User Sheets Folder** / **(Dry Run)** — all sheets in folder → Master; same as above, across every sheet in the folder
 - **Rename Columns → User Sheets Folder** / **(Dry Run)** — rename one header across all sheets in folder; skips sheets where old header is missing or new header already exists; data rows untouched
 - **Set Up Config Tabs** — formats Settings and Column Mapping tabs with labels, descriptions, and instructions; preserves existing values
 
 **Settings keys (each operation reads only what it needs):**
 - `Master Spreadsheet` — canonical master; destination for Import, source for Push
 - `External Source` — outside data source for Import only (formerly `Source Spreadsheet`)
-- `User Sheet` — single user sheet for Push → User Sheet only (new)
-- `User Sheets Folder` — folder for Push → Folder only (formerly `Target Folder`)
+- `Source Tab Name` — optional tab name for Import; if blank, Import uses the first tab
+- `User Sheet` — single user sheet for single-sheet Push/Pull operations
+- `User Sheets Folder` — folder for folder-wide Push/Pull/Rename operations (formerly `Target Folder`)
 - `Match Column` — shared by all operations
 - `Rename Column - From` — existing header name to rename in folder-wide rename operation
 - `Rename Column - To` — new header name for folder-wide rename operation
+- `Sensitive Columns` — optional comma-separated headers used when pushing missing rows into user sheets
+- `Pull Column Policy` tab — controls whether Pull Data fills blanks, overwrites, logs conflicts, or skips each column
 
 **Key behaviors:**
 - Each Sync automatically adds any missing target columns before filling data — no separate step needed
 - New columns are appended after the last existing column, formatted as plain General (no inherited checkboxes)
 - Blank target cells are filled; non-blank differing cells are logged as conflicts and not overwritten
 - Folder-wide rename operation changes header cells in row 1 only; it never edits data rows
+- Pull Missing Rows adds captain-only headers to master, then appends missing rows by header-name join using `resident_id`
+- Pull Missing Rows skips rows with blank `resident_id` and skips duplicate IDs already present in master or seen earlier in the same folder run
+- Pull Data updates existing master rows according to `Pull Column Policy`, adds captain-only headers to master, and appends rows missing from master
+- Pull Data never writes source blank cells into master; unlisted columns default to conflict-only, and `resident_id` is always protected
 - Placeholder rows in Column Mapping (e.g. `(header name in master)`) and rows with either cell blank are silently skipped
 - Sync operations write unified operation logs (Column Added / Filled / Conflict / Error), and the rename operation writes Renamed / Skipped / Error entries; each run clears and rewrites its own log tab
 

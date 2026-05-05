@@ -15,7 +15,7 @@
  * spreadsheet and returns a structured config object.
  *
  * @param {SpreadsheetApp.Spreadsheet} configSpreadsheet
- * @return {{ sourceId: string, matchColumn: string, folderId: string, masterId: string, renameFrom: string, renameTo: string, columnMap: Array<{source: string, target: string}> }}
+ * @return {{ sourceId: string, sourceTabName: string, matchColumn: string, folderId: string, masterId: string, renameFrom: string, renameTo: string, columnMap: Array<{source: string, target: string}>, sensitiveColumns: Array<string>, pullColumnPolicies: Object }}
  */
 function readMergeConfig_(configSpreadsheet) {
   var settingsSheet = configSpreadsheet.getSheetByName('Settings');
@@ -45,14 +45,223 @@ function readMergeConfig_(configSpreadsheet) {
   return {
     masterId:         settings['Master Spreadsheet'] || '',
     sourceId:         settings['External Source'] || settings['Source Spreadsheet'] || '',
+    sourceTabName:    settings['Source Tab Name'] || '',
     userSheetId:      settings['User Sheet'] || '',
     folderId:         settings['User Sheets Folder'] || settings['Target Folder'] || '',
     matchColumn:      settings['Match Column'] || '',
     renameFrom:       settings['Rename Column - From'] || '',
     renameTo:         settings['Rename Column - To'] || '',
     columnMap:        columnMap,
-    sensitiveColumns: parseSensitiveColumns_(settings['Sensitive Columns'] || '')
+    sensitiveColumns: parseSensitiveColumns_(settings['Sensitive Columns'] || ''),
+    pullColumnPolicies: readPullColumnPolicies_(configSpreadsheet)
   };
+}
+
+/**
+ * Reads task-oriented workflow presets from the "Workflow Presets" tab.
+ * These presets power the sidebar UI while keeping the existing Settings
+ * and Column Mapping tabs available for the legacy menu operations.
+ *
+ * @param {SpreadsheetApp.Spreadsheet} configSpreadsheet
+ * @return {Array<Object>}
+ */
+function readWorkflowPresets_(configSpreadsheet) {
+  var tab = configSpreadsheet.getSheetByName('Workflow Presets');
+  if (!tab) return [];
+
+  var data = tab.getDataRange().getValues();
+  if (data.length < 2) return [];
+
+  var headers = data[0].map(function (h) { return String(h).trim(); });
+  var presets = [];
+
+  for (var r = 1; r < data.length; r++) {
+    var row = data[r];
+    var preset = {
+      id: getRowValueByHeader_(row, headers, 'Workflow ID'),
+      name: getRowValueByHeader_(row, headers, 'Workflow Name'),
+      operation: getRowValueByHeader_(row, headers, 'Operation'),
+      enabled: normalizeYesNo_(getRowValueByHeader_(row, headers, 'Enabled')),
+      sourceId: getRowValueByHeader_(row, headers, 'Source Spreadsheet'),
+      sourceTabName: getRowValueByHeader_(row, headers, 'Source Tab'),
+      masterId: getRowValueByHeader_(row, headers, 'Master Spreadsheet'),
+      matchColumn: getRowValueByHeader_(row, headers, 'Match Column'),
+      columnMap: parseWorkflowColumnMap_(getRowValueByHeader_(row, headers, 'Column Mappings')),
+      notes: getRowValueByHeader_(row, headers, 'Notes')
+    };
+
+    if (preset.id === '' && preset.name === '') continue;
+    if (preset.id === '') preset.id = makeWorkflowId_(preset.name);
+    presets.push(preset);
+  }
+
+  return presets;
+}
+
+/**
+ * Finds a workflow preset by ID.
+ *
+ * @param {SpreadsheetApp.Spreadsheet} configSpreadsheet
+ * @param {string} workflowId
+ * @return {Object|null}
+ */
+function getWorkflowPreset_(configSpreadsheet, workflowId) {
+  var id = String(workflowId || '').trim();
+  var presets = readWorkflowPresets_(configSpreadsheet);
+  for (var i = 0; i < presets.length; i++) {
+    if (presets[i].id === id) return presets[i];
+  }
+  return null;
+}
+
+/**
+ * Reads one cell from a row by header name.
+ *
+ * @param {Array} row
+ * @param {Array<string>} headers
+ * @param {string} header
+ * @return {string}
+ */
+function getRowValueByHeader_(row, headers, header) {
+  var idx = headers.indexOf(header);
+  if (idx === -1) return '';
+  return String(row[idx] || '').trim();
+}
+
+/**
+ * Parses a multiline "Source -> Target" mapping list from a workflow preset.
+ *
+ * @param {string} raw
+ * @return {Array<{source: string, target: string}>}
+ */
+function parseWorkflowColumnMap_(raw) {
+  var text = String(raw || '').trim();
+  if (text === '') return [];
+
+  var lines = text.split(/\r?\n/);
+  var mappings = [];
+  for (var i = 0; i < lines.length; i++) {
+    var line = String(lines[i] || '').trim();
+    if (line === '') continue;
+
+    var parts = line.indexOf('->') !== -1 ? line.split('->') : line.split('|');
+    var source = String(parts[0] || '').trim();
+    var target = String(parts.length > 1 ? parts.slice(1).join('->') : parts[0]).trim();
+
+    if (source === '' || target === '') continue;
+    mappings.push({ source: source, target: target });
+  }
+
+  return mappings;
+}
+
+/**
+ * Normalizes a yes/no-ish value to a boolean. Blank means enabled.
+ *
+ * @param {string} value
+ * @return {boolean}
+ */
+function normalizeYesNo_(value) {
+  var text = String(value || '').trim().toLowerCase();
+  if (text === '' || text === 'yes' || text === 'y' || text === 'true' || text === 'enabled') return true;
+  return false;
+}
+
+/**
+ * Converts a display workflow name to a stable-ish ID.
+ *
+ * @param {string} name
+ * @return {string}
+ */
+function makeWorkflowId_(name) {
+  return String(name || 'workflow')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'workflow';
+}
+
+/**
+ * Selects a sheet by name, falling back to the first tab when no name is set.
+ *
+ * @param {SpreadsheetApp.Spreadsheet} spreadsheet
+ * @param {string} sheetName
+ * @return {SpreadsheetApp.Sheet}
+ */
+function getConfiguredSheet_(spreadsheet, sheetName) {
+  var requested = String(sheetName || '').trim();
+  if (requested === '') return spreadsheet.getSheets()[0];
+
+  var sheet = spreadsheet.getSheetByName(requested);
+  if (!sheet) {
+    throw new Error('Tab "' + requested + '" was not found in "' + spreadsheet.getName() + '".');
+  }
+  return sheet;
+}
+
+/**
+ * Checks whether the given headers contain all named columns.
+ *
+ * @param {Array<string>} headers
+ * @param {Array<string>} required
+ * @return {Array<string>}
+ */
+function findMissingHeaders_(headers, required) {
+  var missing = [];
+  for (var i = 0; i < required.length; i++) {
+    var header = String(required[i] || '').trim();
+    if (header !== '' && headers.indexOf(header) === -1 && missing.indexOf(header) === -1) {
+      missing.push(header);
+    }
+  }
+  return missing;
+}
+
+/**
+ * Reads the Pull Column Policy tab into a map of header name → policy.
+ * Supported policies:
+ * - fill_blank: fill master only when the master cell is blank
+ * - overwrite: replace non-blank master values with source values
+ * - conflict: log differences without writing
+ * - never: skip this column entirely
+ *
+ * Missing policy rows default to conflict in the pull-data operation.
+ * resident_id is always forced to never because it is the row identity.
+ *
+ * @param {SpreadsheetApp.Spreadsheet} configSpreadsheet
+ * @return {Object}
+ */
+function readPullColumnPolicies_(configSpreadsheet) {
+  var policies = { resident_id: 'never' };
+  var tab = configSpreadsheet.getSheetByName('Pull Column Policy');
+  if (!tab) return policies;
+
+  var data = tab.getDataRange().getValues();
+  for (var i = 1; i < data.length; i++) {
+    var column = String(data[i][0]).trim();
+    var policy = normalizePullPolicy_(data[i][1]);
+    if (column === '') continue;
+    if (column.charAt(0) === '(' && column.charAt(column.length - 1) === ')') continue;
+    if (!policy) continue;
+    policies[column] = policy;
+  }
+
+  policies.resident_id = 'never';
+  return policies;
+}
+
+/**
+ * Normalizes policy labels from the Pull Column Policy tab.
+ *
+ * @param {*} raw
+ * @return {string}
+ */
+function normalizePullPolicy_(raw) {
+  var policy = String(raw || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (policy === 'fill' || policy === 'fill_blanks' || policy === 'fill_blank_only') return 'fill_blank';
+  if (policy === 'overwrite' || policy === 'replace') return 'overwrite';
+  if (policy === 'conflict' || policy === 'log_conflict' || policy === 'log_only') return 'conflict';
+  if (policy === 'never' || policy === 'skip' || policy === 'ignore') return 'never';
+  return '';
 }
 
 /**
@@ -712,6 +921,448 @@ function appendMissingRowsToSheet_(targetSheet, masterData, masterHeaders, sensi
 }
 
 /**
+ * Builds shared master state for Pull Missing Rows operations. Folder-wide
+ * pulls pass this state through each source sheet so dry runs and live runs
+ * both skip duplicate resident_ids discovered earlier in the same run.
+ *
+ * @param {SpreadsheetApp.Sheet} masterSheet
+ * @return {{ headers: Array<string>, existingIds: Object, nextMasterRow: number }}
+ */
+function buildMasterPullState_(masterSheet) {
+  var masterData = masterSheet.getDataRange().getValues();
+  var headers = masterData.length > 0
+    ? masterData[0].map(function (h) { return String(h).trim(); })
+    : [];
+  var idCol = headers.indexOf('resident_id');
+  var existingIds = {};
+
+  if (idCol !== -1) {
+    for (var r = 1; r < masterData.length; r++) {
+      var id = String(masterData[r][idCol] || '').trim();
+      if (id !== '' && id !== 'undefined' && id !== 'null') {
+        existingIds[id] = true;
+      }
+    }
+  }
+
+  return {
+    headers: headers,
+    existingIds: existingIds,
+    nextMasterRow: masterSheet.getLastRow() + 1
+  };
+}
+
+/**
+ * Appends rows from a captain/user sheet into the master when their
+ * resident_id is not already present in the master. Source-only headers are
+ * added to the master first so captain-created fields are preserved.
+ *
+ * Column values on new master rows are populated by header-name join:
+ * every master column where the source has the same header is filled from
+ * the source row. Master columns absent from the source are left blank.
+ *
+ * Pure addition. Existing master rows are never modified, and rows are never
+ * removed. Duplicate resident_ids already present in master, or seen earlier
+ * in the same pull run, are skipped.
+ *
+ * @param {SpreadsheetApp.Sheet} masterSheet
+ * @param {SpreadsheetApp.Sheet} sourceSheet
+ * @param {string} sourceName
+ * @param {boolean} dryRun
+ * @param {{ headers: Array<string>, existingIds: Object, nextMasterRow: number }} masterState
+ * @return {{ columnsAdded: Array, appended: Array, skipped: Array, errors: Array }}
+ */
+function appendMissingRowsToMaster_(masterSheet, sourceSheet, sourceName, dryRun, masterState) {
+  var result = {
+    columnsAdded: [],
+    appended: [],
+    skipped: [],
+    errors: []
+  };
+
+  if (!masterState || !masterState.headers) {
+    masterState = buildMasterPullState_(masterSheet);
+  }
+
+  var masterIdCol = masterState.headers.indexOf('resident_id');
+  if (masterIdCol === -1) {
+    result.errors.push({ message: 'Master has no resident_id column' });
+    return result;
+  }
+
+  var sourceData = sourceSheet.getDataRange().getValues();
+  if (sourceData.length === 0) {
+    result.errors.push({ message: 'Source sheet is empty (no header row)' });
+    return result;
+  }
+
+  var sourceHeaders = sourceData[0].map(function (h) { return String(h).trim(); });
+  var sourceIdCol = sourceHeaders.indexOf('resident_id');
+  if (sourceIdCol === -1) {
+    result.errors.push({ message: 'Source sheet has no resident_id column' });
+    return result;
+  }
+
+  var sourceIndexByHeader = {};
+  var missingHeaders = [];
+  var missingSeen = {};
+  for (var sh = 0; sh < sourceHeaders.length; sh++) {
+    var sourceHeader = sourceHeaders[sh];
+    if (sourceHeader === '') continue;
+    if (sourceIndexByHeader[sourceHeader] === undefined) {
+      sourceIndexByHeader[sourceHeader] = sh;
+    }
+    if (masterState.headers.indexOf(sourceHeader) === -1 && !missingSeen[sourceHeader]) {
+      missingHeaders.push(sourceHeader);
+      missingSeen[sourceHeader] = true;
+    }
+  }
+
+  if (missingHeaders.length > 0) {
+    var addResult = addColumnsToTarget_(masterSheet, missingHeaders, dryRun);
+    for (var a = 0; a < addResult.added.length; a++) {
+      var addedColumn = addResult.added[a].column;
+      result.columnsAdded.push({ column: addedColumn });
+      masterState.headers.push(addedColumn);
+    }
+    for (var e = 0; e < addResult.errors.length; e++) {
+      result.errors.push({ message: 'Could not add column "' + addResult.errors[e].column + '": ' + addResult.errors[e].message });
+    }
+  }
+
+  var residentNameCol = sourceHeaders.indexOf('Resident Name');
+  var newRows = [];
+
+  for (var r = 1; r < sourceData.length; r++) {
+    var sourceRow = sourceData[r];
+    var residentId = String(sourceRow[sourceIdCol] || '').trim();
+    var residentName = residentNameCol !== -1 ? String(sourceRow[residentNameCol] || '').trim() : '';
+
+    if (residentId === '' || residentId === 'undefined' || residentId === 'null') {
+      result.skipped.push({
+        sourceRow: r + 1,
+        residentId: '',
+        residentName: residentName,
+        reason: 'Blank resident_id'
+      });
+      continue;
+    }
+
+    if (masterState.existingIds[residentId]) {
+      result.skipped.push({
+        sourceRow: r + 1,
+        residentId: residentId,
+        residentName: residentName,
+        reason: 'resident_id already exists in master or earlier source row'
+      });
+      continue;
+    }
+
+    var newRow = [];
+    for (var mh = 0; mh < masterState.headers.length; mh++) {
+      var masterHeader = masterState.headers[mh];
+      var sourceIdx = sourceIndexByHeader[masterHeader];
+      newRow.push(sourceIdx === undefined ? '' : sourceRow[sourceIdx]);
+    }
+
+    var masterRowNumber = masterState.nextMasterRow + newRows.length;
+    result.appended.push({
+      sourceRow: r + 1,
+      masterRow: masterRowNumber,
+      residentId: residentId,
+      residentName: residentName
+    });
+    newRows.push(newRow);
+    masterState.existingIds[residentId] = true;
+  }
+
+  if (!dryRun && newRows.length > 0) {
+    var startRow = masterSheet.getLastRow() + 1;
+    masterSheet.getRange(startRow, 1, newRows.length, masterState.headers.length).setValues(newRows);
+  }
+
+  masterState.nextMasterRow += newRows.length;
+  return result;
+}
+
+/**
+ * Builds shared master state for Pull Data operations. The state carries
+ * current master values across all source sheets in one run so later sources
+ * see rows/values added or changed by earlier sources.
+ *
+ * @param {SpreadsheetApp.Sheet} masterSheet
+ * @return {{ headers: Array<string>, data: Array<Array>, idToRowIndex: Object, processedIds: Object, nextMasterRow: number }}
+ */
+function buildMasterPullDataState_(masterSheet) {
+  var masterData = masterSheet.getDataRange().getValues();
+  var headers = masterData.length > 0
+    ? masterData[0].map(function (h) { return String(h).trim(); })
+    : [];
+  var idCol = headers.indexOf('resident_id');
+  var idToRowIndex = {};
+
+  if (idCol !== -1) {
+    for (var r = 1; r < masterData.length; r++) {
+      var id = String(masterData[r][idCol] || '').trim();
+      if (id !== '' && id !== 'undefined' && id !== 'null' && idToRowIndex[id] === undefined) {
+        idToRowIndex[id] = r;
+      }
+    }
+  }
+
+  return {
+    headers: headers,
+    data: masterData,
+    idToRowIndex: idToRowIndex,
+    processedIds: {},
+    nextMasterRow: masterSheet.getLastRow() + 1
+  };
+}
+
+/**
+ * Pulls captain-entered data from a source sheet into the master. Existing
+ * master rows are updated according to Pull Column Policy; source rows whose
+ * resident_id is absent from master are appended as new master rows.
+ *
+ * Policy behavior for existing rows:
+ * - fill_blank: write only when master is blank; differing non-blank values
+ *   are logged as conflicts
+ * - overwrite: write any non-blank source value that differs from master
+ * - conflict: log differences without writing
+ * - never: do not touch the column
+ *
+ * @param {SpreadsheetApp.Sheet} masterSheet
+ * @param {SpreadsheetApp.Sheet} sourceSheet
+ * @param {string} sourceName
+ * @param {Object} pullColumnPolicies
+ * @param {boolean} dryRun
+ * @param {{ headers: Array<string>, data: Array<Array>, idToRowIndex: Object, processedIds: Object, nextMasterRow: number }} pullState
+ * @return {{ columnsAdded: Array, appended: Array, filled: Array, overwritten: Array, conflicts: Array, skipped: Array, errors: Array }}
+ */
+function pullDataIntoMaster_(masterSheet, sourceSheet, sourceName, pullColumnPolicies, dryRun, pullState) {
+  var result = {
+    columnsAdded: [],
+    appended: [],
+    filled: [],
+    overwritten: [],
+    conflicts: [],
+    skipped: [],
+    errors: []
+  };
+
+  if (!pullState || !pullState.headers) {
+    pullState = buildMasterPullDataState_(masterSheet);
+  }
+  pullColumnPolicies = pullColumnPolicies || {};
+  pullColumnPolicies.resident_id = 'never';
+
+  var masterIdCol = pullState.headers.indexOf('resident_id');
+  if (masterIdCol === -1) {
+    result.errors.push({ message: 'Master has no resident_id column' });
+    return result;
+  }
+
+  var sourceData = sourceSheet.getDataRange().getValues();
+  if (sourceData.length === 0) {
+    result.errors.push({ message: 'Source sheet is empty (no header row)' });
+    return result;
+  }
+
+  var sourceHeaders = sourceData[0].map(function (h) { return String(h).trim(); });
+  var sourceIdCol = sourceHeaders.indexOf('resident_id');
+  if (sourceIdCol === -1) {
+    result.errors.push({ message: 'Source sheet has no resident_id column' });
+    return result;
+  }
+
+  var sourceIndexByHeader = {};
+  var missingHeaders = [];
+  var missingSeen = {};
+  for (var sh = 0; sh < sourceHeaders.length; sh++) {
+    var sourceHeader = sourceHeaders[sh];
+    if (sourceHeader === '') continue;
+    if (sourceIndexByHeader[sourceHeader] === undefined) {
+      sourceIndexByHeader[sourceHeader] = sh;
+    }
+    if (pullState.headers.indexOf(sourceHeader) === -1 && !missingSeen[sourceHeader]) {
+      missingHeaders.push(sourceHeader);
+      missingSeen[sourceHeader] = true;
+    }
+  }
+
+  if (missingHeaders.length > 0) {
+    var addResult = addColumnsToTarget_(masterSheet, missingHeaders, dryRun);
+    for (var a = 0; a < addResult.added.length; a++) {
+      var addedColumn = addResult.added[a].column;
+      result.columnsAdded.push({ column: addedColumn });
+      pullState.headers.push(addedColumn);
+      for (var dr = 0; dr < pullState.data.length; dr++) {
+        pullState.data[dr].push(dr === 0 ? addedColumn : '');
+      }
+    }
+    for (var e = 0; e < addResult.errors.length; e++) {
+      result.errors.push({ message: 'Could not add column "' + addResult.errors[e].column + '": ' + addResult.errors[e].message });
+    }
+  }
+
+  var residentNameCol = sourceHeaders.indexOf('Resident Name');
+  var writeQueue = [];
+  var newRows = [];
+
+  for (var r = 1; r < sourceData.length; r++) {
+    var sourceRow = sourceData[r];
+    var residentId = String(sourceRow[sourceIdCol] || '').trim();
+    var residentName = residentNameCol !== -1 ? String(sourceRow[residentNameCol] || '').trim() : '';
+
+    if (residentId === '' || residentId === 'undefined' || residentId === 'null') {
+      result.skipped.push({
+        sourceRow: r + 1,
+        masterRow: '',
+        residentId: '',
+        residentName: residentName,
+        column: '',
+        policy: '',
+        existingValue: '',
+        newValue: '',
+        reason: 'Blank resident_id'
+      });
+      continue;
+    }
+
+    if (pullState.processedIds[residentId]) {
+      result.skipped.push({
+        sourceRow: r + 1,
+        masterRow: '',
+        residentId: residentId,
+        residentName: residentName,
+        column: '',
+        policy: '',
+        existingValue: '',
+        newValue: '',
+        reason: 'resident_id already processed earlier in this pull run'
+      });
+      continue;
+    }
+
+    var masterRowIndex = pullState.idToRowIndex[residentId];
+    if (masterRowIndex === undefined) {
+      var newRow = [];
+      for (var mh = 0; mh < pullState.headers.length; mh++) {
+        var masterHeader = pullState.headers[mh];
+        var sourceIdx = sourceIndexByHeader[masterHeader];
+        newRow.push(sourceIdx === undefined ? '' : sourceRow[sourceIdx]);
+      }
+
+      var masterRowNumber = pullState.nextMasterRow + newRows.length;
+      result.appended.push({
+        sourceRow: r + 1,
+        masterRow: masterRowNumber,
+        residentId: residentId,
+        residentName: residentName
+      });
+      newRows.push(newRow);
+      pullState.data.push(newRow);
+      pullState.idToRowIndex[residentId] = pullState.data.length - 1;
+      pullState.processedIds[residentId] = true;
+      continue;
+    }
+
+    var masterRow = pullState.data[masterRowIndex];
+    var masterRowNum = masterRowIndex + 1;
+    for (var h = 0; h < pullState.headers.length; h++) {
+      var header = pullState.headers[h];
+      if (header === '') continue;
+      var srcIdx = sourceIndexByHeader[header];
+      if (srcIdx === undefined) continue;
+
+      var sourceVal = sourceRow[srcIdx];
+      var sourceBlank = (sourceVal === '' || sourceVal === null || sourceVal === undefined);
+      if (sourceBlank) continue;
+
+      var masterVal = masterRow[h];
+      var masterBlank = (masterVal === '' || masterVal === null || masterVal === undefined || masterVal === false);
+      var policy = pullColumnPolicies[header] || 'conflict';
+
+      if (policy === 'never') {
+        if (header !== 'resident_id') {
+          result.skipped.push({
+            sourceRow: r + 1,
+            masterRow: masterRowNum,
+            residentId: residentId,
+            residentName: residentName,
+            column: header,
+            policy: policy,
+            existingValue: masterVal,
+            newValue: sourceVal,
+            reason: 'Policy is never'
+          });
+        }
+        continue;
+      }
+
+      if (masterVal === sourceVal) continue;
+
+      if (policy === 'fill_blank') {
+        if (masterBlank) {
+          result.filled.push(makePullDataCellResult_(r + 1, masterRowNum, residentId, residentName, header, policy, masterVal, sourceVal));
+          writeQueue.push({ row: masterRowNum, col: h + 1, val: sourceVal, wasCheckbox: (masterVal === false) });
+          masterRow[h] = sourceVal;
+        } else {
+          result.conflicts.push(makePullDataCellResult_(r + 1, masterRowNum, residentId, residentName, header, policy, masterVal, sourceVal));
+        }
+      } else if (policy === 'overwrite') {
+        if (masterBlank) {
+          result.filled.push(makePullDataCellResult_(r + 1, masterRowNum, residentId, residentName, header, policy, masterVal, sourceVal));
+        } else {
+          result.overwritten.push(makePullDataCellResult_(r + 1, masterRowNum, residentId, residentName, header, policy, masterVal, sourceVal));
+        }
+        writeQueue.push({ row: masterRowNum, col: h + 1, val: sourceVal, wasCheckbox: (masterVal === false) });
+        masterRow[h] = sourceVal;
+      } else {
+        result.conflicts.push(makePullDataCellResult_(r + 1, masterRowNum, residentId, residentName, header, policy, masterVal, sourceVal));
+      }
+    }
+
+    pullState.processedIds[residentId] = true;
+  }
+
+  if (!dryRun) {
+    for (var w = 0; w < writeQueue.length; w++) {
+      var cell = masterSheet.getRange(writeQueue[w].row, writeQueue[w].col);
+      if (writeQueue[w].wasCheckbox) {
+        cell.clearDataValidations();
+        cell.setNumberFormat('General');
+      }
+      cell.setValue(writeQueue[w].val);
+    }
+
+    if (newRows.length > 0) {
+      var startRow = masterSheet.getLastRow() + 1;
+      masterSheet.getRange(startRow, 1, newRows.length, pullState.headers.length).setValues(newRows);
+    }
+  }
+
+  pullState.nextMasterRow += newRows.length;
+  return result;
+}
+
+/**
+ * Creates a standard cell-level pull-data result entry.
+ */
+function makePullDataCellResult_(sourceRow, masterRow, residentId, residentName, column, policy, existingValue, newValue) {
+  return {
+    sourceRow: sourceRow,
+    masterRow: masterRow,
+    residentId: residentId,
+    residentName: residentName,
+    column: column,
+    policy: policy,
+    existingValue: existingValue,
+    newValue: newValue
+  };
+}
+
+/**
  * Appends rows-appended results to a log tab, creating the tab with
  * a header row on first write. Errors are recorded inline.
  *
@@ -776,5 +1427,178 @@ function appendToFlaggedSensitiveLog_(spreadsheet, tabName, sheetName, detectedZ
   if (newRows.length > 0) {
     var startRow = tab.getLastRow() + 1;
     tab.getRange(startRow, 1, newRows.length, header.length).setValues(newRows);
+  }
+}
+
+/**
+ * Appends pull-missing-rows results to a log tab, creating the tab with
+ * a header row on first write. Includes columns added to master, rows
+ * appended to master, skipped source rows, and errors.
+ *
+ * @param {SpreadsheetApp.Spreadsheet} spreadsheet
+ * @param {string} tabName
+ * @param {string} sourceName
+ * @param {{ columnsAdded: Array, appended: Array, skipped: Array, errors: Array }} result
+ */
+function appendToPullMissingRowsLog_(spreadsheet, tabName, sourceName, result) {
+  var tab = spreadsheet.getSheetByName(tabName);
+  var header = ['Type', 'Source Spreadsheet', 'Source Row #', 'Master Row #', 'resident_id', 'Resident Name', 'Column', 'Notes'];
+  if (!tab) {
+    tab = spreadsheet.insertSheet(tabName);
+    tab.getRange(1, 1, 1, header.length).setValues([header]);
+    formatHeaderRow_(tab, header.length);
+    tab.setFrozenRows(1);
+  }
+
+  var newRows = [];
+  for (var c = 0; c < result.columnsAdded.length; c++) {
+    newRows.push(['Column Added', sourceName, '', 1, '', '', result.columnsAdded[c].column, 'Added to master']);
+  }
+  for (var a = 0; a < result.appended.length; a++) {
+    var appended = result.appended[a];
+    newRows.push([
+      'Appended',
+      sourceName,
+      appended.sourceRow,
+      appended.masterRow,
+      appended.residentId,
+      appended.residentName,
+      '',
+      'Appended to master'
+    ]);
+  }
+  for (var s = 0; s < result.skipped.length; s++) {
+    var skipped = result.skipped[s];
+    newRows.push([
+      'Skipped',
+      sourceName,
+      skipped.sourceRow,
+      '',
+      skipped.residentId,
+      skipped.residentName,
+      '',
+      skipped.reason
+    ]);
+  }
+  for (var e = 0; e < result.errors.length; e++) {
+    newRows.push(['Error', sourceName, '', '', '', '', '', result.errors[e].message]);
+  }
+
+  if (newRows.length > 0) {
+    var startRow = tab.getLastRow() + 1;
+    tab.getRange(startRow, 1, newRows.length, header.length).setValues(newRows);
+  }
+}
+
+/**
+ * Appends policy-driven pull-data results to a log tab, creating the tab with
+ * a header row on first write.
+ *
+ * @param {SpreadsheetApp.Spreadsheet} spreadsheet
+ * @param {string} tabName
+ * @param {string} sourceName
+ * @param {{ columnsAdded: Array, appended: Array, filled: Array, overwritten: Array, conflicts: Array, skipped: Array, errors: Array }} result
+ */
+function appendToPullDataLog_(spreadsheet, tabName, sourceName, result) {
+  var tab = spreadsheet.getSheetByName(tabName);
+  var header = [
+    'Type',
+    'Source Spreadsheet',
+    'Source Row #',
+    'Master Row #',
+    'resident_id',
+    'Resident Name',
+    'Column',
+    'Policy',
+    'Existing Master Value',
+    'Source Value',
+    'Notes'
+  ];
+  if (!tab) {
+    tab = spreadsheet.insertSheet(tabName);
+    tab.getRange(1, 1, 1, header.length).setValues([header]);
+    formatHeaderRow_(tab, header.length);
+    tab.setFrozenRows(1);
+  }
+
+  var newRows = [];
+
+  for (var c = 0; c < result.columnsAdded.length; c++) {
+    newRows.push(['Column Added', sourceName, '', 1, '', '', result.columnsAdded[c].column, '', '', '', 'Added to master']);
+  }
+
+  for (var a = 0; a < result.appended.length; a++) {
+    var appended = result.appended[a];
+    newRows.push([
+      'Appended',
+      sourceName,
+      appended.sourceRow,
+      appended.masterRow,
+      appended.residentId,
+      appended.residentName,
+      '',
+      '',
+      '',
+      '',
+      'Appended source row to master'
+    ]);
+  }
+
+  appendPullDataCellRows_(newRows, sourceName, 'Filled', result.filled, 'Filled master from source');
+  appendPullDataCellRows_(newRows, sourceName, 'Overwritten', result.overwritten, 'Overwrote master from source');
+  appendPullDataCellRows_(newRows, sourceName, 'Conflict', result.conflicts, 'Policy did not allow write');
+
+  for (var s = 0; s < result.skipped.length; s++) {
+    var skipped = result.skipped[s];
+    newRows.push([
+      'Skipped',
+      sourceName,
+      skipped.sourceRow,
+      skipped.masterRow,
+      skipped.residentId,
+      skipped.residentName,
+      skipped.column,
+      skipped.policy,
+      skipped.existingValue,
+      skipped.newValue,
+      skipped.reason
+    ]);
+  }
+
+  for (var e = 0; e < result.errors.length; e++) {
+    newRows.push(['Error', sourceName, '', '', '', '', '', '', '', '', result.errors[e].message]);
+  }
+
+  if (newRows.length > 0) {
+    var startRow = tab.getLastRow() + 1;
+    tab.getRange(startRow, 1, newRows.length, header.length).setValues(newRows);
+  }
+}
+
+/**
+ * Adds cell-level pull-data entries to an output row array.
+ *
+ * @param {Array<Array>} rows
+ * @param {string} sourceName
+ * @param {string} type
+ * @param {Array} entries
+ * @param {string} note
+ */
+function appendPullDataCellRows_(rows, sourceName, type, entries, note) {
+  for (var i = 0; i < entries.length; i++) {
+    var entry = entries[i];
+    rows.push([
+      type,
+      sourceName,
+      entry.sourceRow,
+      entry.masterRow,
+      entry.residentId,
+      entry.residentName,
+      entry.column,
+      entry.policy,
+      entry.existingValue,
+      entry.newValue,
+      note
+    ]);
   }
 }

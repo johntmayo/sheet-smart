@@ -1,6 +1,6 @@
 # Sheet Smart — How to Use
 
-Google Apps Script tooling for auditing and correcting ~55 Google Spreadsheets derived from a single master. Two independent tools: a **Phase 1 audit script** (`Code.gs`) and a **Phase 2 sync tool** (`MergeEngine.gs` + `Corrections.gs` in a config spreadsheet).
+Google Apps Script tooling for auditing and correcting ~55 Google Spreadsheets derived from a single master. Two independent tools: a **Phase 1 audit script** (`Code.gs`) and a **Phase 2 sync tool** (`MergeEngine.gs` + `Corrections.gs` + `Sidebar.html` in a config spreadsheet).
 
 ---
 
@@ -48,7 +48,7 @@ Run `runAudit()` any time you want a fresh snapshot. Each run creates a new repo
 
 ## Phase 2: Sync Tool
 
-Five operations for managing data and schema across your master spreadsheet and user sheets. Sync operations automatically add any missing columns before filling data — you never need a separate step.
+Operations for managing data and schema across your master spreadsheet and user sheets. Sync operations automatically add any missing columns before filling data — you never need a separate step.
 
 ### Core concepts
 
@@ -57,7 +57,9 @@ Five operations for managing data and schema across your master spreadsheet and 
 | **Master** | Your canonical spreadsheet. The source of truth for column structure and shared data. |
 | **User Sheet** | One of the ~55 individual spreadsheets delivered to users. |
 | **External Source** | Any other spreadsheet you want to import data FROM into the master (e.g. a sales feed, a contractor's file). |
+| **Source Tab Name** | Optional tab inside the external source spreadsheet. If blank, imports use the first tab. |
 | **Match Column** | The column that exists in both master and user sheets to match rows — usually APN. |
+| **Workflow Preset** | A named, task-oriented configuration used by the guided sidebar (for example, "Update Master From Sales Tracker"). |
 
 ### The operations
 
@@ -68,24 +70,31 @@ Five operations for managing data and schema across your master spreadsheet and 
 | **Push → User Sheets Folder** | Master | All sheets in a folder | Push master data to all user sheets (fills blank cells in existing rows) |
 | **Push Missing Rows → User Sheet** | Master | One user sheet | Append rows from master whose `ZoneName` matches the sheet's zone but whose `resident_id` isn't there yet |
 | **Push Missing Rows → User Sheets Folder** | Master | All sheets in a folder | Same as above, but across every sheet in the folder |
+| **Pull Missing Rows ← User Sheet** | One user sheet | Master | Append captain-created rows whose `resident_id` is not already in master |
+| **Pull Missing Rows ← User Sheets Folder** | All sheets in a folder | Master | Same as above, but across every sheet in the folder |
+| **Pull Data ← User Sheet** | One user sheet | Master | Pull captain-entered values into existing master rows using `Pull Column Policy`; also appends missing rows |
+| **Pull Data ← User Sheets Folder** | All sheets in a folder | Master | Same as above, but across every sheet in the folder |
 | **Rename Columns → User Sheets Folder** | Settings (`Rename Column - From`, `Rename Column - To`) | All sheets in a folder | Rename one header across all user sheets without touching row data |
 
-> The regular **Push** operations only fill blank cells inside existing rows — they never add rows. The **Push Missing Rows** operations only add rows — they never modify existing ones. Use both together to keep user sheets aligned with master.
+> The regular **Push** operations only fill blank cells inside existing rows — they never add rows. The **Push Missing Rows** and **Pull Missing Rows** operations only add rows — they never modify existing ones. Use Push and Pull together to keep user sheets and master aligned.
+
+> **Pull Data** is the broader captain-data import. It can fill blanks, overwrite existing master values, or log conflicts based on the `Pull Column Policy` tab.
 
 ### Setup (one-time)
 
 1. Create a new Google Spreadsheet named **Sheet Smart Config**.
-2. Open **Extensions → Apps Script**. Paste `MergeEngine.gs` and `Corrections.gs` from this repo into two separate script files in the same project. Save.
+2. Open **Extensions → Apps Script**. Paste `MergeEngine.gs`, `Corrections.gs`, and `Sidebar.html` from this repo into separate script files in the same project. Save.
 3. Reload the Sheet Smart Config spreadsheet. The **Sheet Smart** menu will appear.
-4. Click **Sheet Smart → Set Up Config Tabs** to format the Settings and Column Mapping tabs.
+4. Click **Sheet Smart → Set Up Config Tabs** to format the Settings, Column Mapping, Pull Column Policy, and Workflow Presets tabs.
 5. Fill in the Settings tab (column B):
 
    | Setting | What to put here |
    |---|---|
    | Master Spreadsheet | ID of your master spreadsheet |
    | External Source | ID of an outside data source (only needed for Import → Master) |
-   | User Sheet | ID of a single user sheet to push to (only needed for Push → User Sheet) |
-   | User Sheets Folder | ID of the Drive folder of user sheets (only needed for Push → Folder) |
+   | Source Tab Name | Optional tab name inside the external source spreadsheet (e.g. `Sales Rollup by APN`) |
+   | User Sheet | ID of a single user sheet to push to or pull from |
+   | User Sheets Folder | ID of the Drive folder of user sheets |
    | Match Column | Column header used to match rows — e.g. `resident_id` |
    | Rename Column - From | Existing header name to rename (only needed for Rename Columns → User Sheets Folder) |
    | Rename Column - To | New header name to write (only needed for Rename Columns → User Sheets Folder) |
@@ -95,6 +104,10 @@ Five operations for managing data and schema across your master spreadsheet and 
 
    **Push Missing Rows requirements:** the master must have `resident_id` and `ZoneName` columns, and each user sheet must also have a `ZoneName` column (normally pushed from master). The user sheet's assigned zone is detected automatically from the most common non-blank value in that column.
 
+   **Pull Missing Rows requirements:** the master and each source user sheet must have a `resident_id` column. Pull operations do not use `ZoneName` filtering — any row from a user sheet with a `resident_id` absent from master is appended to master. If a user sheet has columns not yet in master, those headers are added to master before rows are appended.
+
+   **Pull Data requirements:** the master and each source user sheet must have a `resident_id` column. Existing master rows are updated only according to the `Pull Column Policy` tab. Rows absent from master are appended, and user-sheet columns missing from master are added to master first.
+
 6. Add rows to the Column Mapping tab — one row per column to sync:
 
    | Source Column | Target Column |
@@ -102,6 +115,25 @@ Five operations for managing data and schema across your master spreadsheet and 
    | column name in the source | column name in the destination |
 
    If both spreadsheets use the same column name, put that name in both columns. Rows with a blank cell in either column are automatically skipped.
+
+7. Add rows to the Pull Column Policy tab for captain-entered fields:
+
+   | Column Name | Policy |
+   |---|---|
+   | `Resident Name` | `fill_blank` |
+   | `Damage` | `overwrite` |
+   | `ZoneName` | `conflict` |
+   | `resident_id` | `never` |
+
+   Policy values:
+   - `fill_blank` writes the captain value only when the master cell is blank.
+   - `overwrite` replaces the master value when the captain has a non-blank value.
+   - `conflict` logs differences without writing.
+   - `never` skips the column entirely.
+
+   Unlisted columns default to `conflict`, and `resident_id` is always protected as `never`.
+
+8. For guided workflows, review the Workflow Presets tab and then click **Sheet Smart → Open Dashboard**. The first supported sidebar workflow is **Update Master From Sales Tracker**, which runs an Import → Master using the preset's source spreadsheet, source tab, match column, and mappings. Start with **Dry Run** and review the log before running live.
 
 > **Note:** Phase 2 does not require the Drive Advanced Service. Only Phase 1 needs it.
 
@@ -112,6 +144,8 @@ Five operations for managing data and schema across your master spreadsheet and 
 - **Target cell already has a value that differs from source** → logged as a **Conflict**, left unchanged. You decide what to do.
 - **Missing column in target sheet** → column header is appended to the end of the header row; all new cells start as plain General format (no checkboxes, no false values).
 - **Push Missing Rows** appends whole new rows at the bottom of the target, populated by header-name join from master (every target column with a matching master header is filled). Existing rows are never modified; rows are never removed. Running it multiple times is safe — residents already in the sheet are skipped.
+- **Pull Missing Rows** appends whole new rows at the bottom of the master, populated by header-name join from each user sheet. User-sheet columns missing from master are added to master first. Existing master rows are never modified; rows are never removed. Running it multiple times is safe — residents already in master are skipped.
+- **Pull Data** updates existing master rows according to `Pull Column Policy`, then appends rows whose `resident_id` is not already in master. Source blank cells never overwrite master values.
 
 ### Where results go
 
@@ -124,6 +158,8 @@ All logs land on tabs in the **Sheet Smart Config** spreadsheet. Each live run c
 | Push → User Sheets Folder | `Last Push - Folder` | `Dry Run - Push Folder` |
 | Push Missing Rows → User Sheet / Folder | `Last Push - Missing Rows` | `Dry Run - Push Missing Rows` |
 | Push Missing Rows (sensitive flags) | `Flagged - Sensitive Data` | `Dry Run - Flagged Sensitive Data` |
+| Pull Missing Rows ← User Sheet / Folder | `Last Pull - Missing Rows` | `Dry Run - Pull Missing Rows` |
+| Pull Data ← User Sheet / Folder | `Last Pull Data` | `Dry Run - Pull Data` |
 | Rename Columns → User Sheets Folder | `Last Rename - Folder` | `Dry Run - Rename Folder` |
 
 The **Flagged - Sensitive Data** tab only appears when at least one appended row had a non-blank value in one or more `Sensitive Columns`. Each row lists the destination spreadsheet, the resident_id and name, and which sensitive columns were populated — so you can go to the captain whose zone the resident came from and confirm that sharing those notes with the new captain is okay.
@@ -132,10 +168,11 @@ The **Flagged - Sensitive Data** tab only appears when at least one appended row
 
 | Type | Means |
 |---|---|
-| Column Added | A missing column header was appended to the target sheet's row 1. |
+| Column Added | A missing column header was appended to the target sheet's row 1; for Pull Missing Rows, this means a source-only header was added to master. |
 | Filled | A blank cell was filled with the source value. |
 | Conflict | The target cell already had a different value. Not overwritten — review manually. |
-| Appended | A whole new row was added at the bottom of the target (Push Missing Rows only). |
+| Appended | A whole new row was added at the bottom of the target (Push Missing Rows or Pull Missing Rows only). |
+| Overwritten | Pull Data replaced an existing master value because the column policy was `overwrite`. |
 | Renamed | The target header in row 1 was changed from the old name to the new name. |
-| Skipped | The rename was not applied (e.g. old header missing, or new header already exists). |
+| Skipped | A row or schema change was intentionally skipped (e.g. duplicate `resident_id`, blank `resident_id`, old header missing, or new header already exists). |
 | Error | Something prevented the row or sheet from being processed. |

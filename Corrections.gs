@@ -23,11 +23,24 @@
 //   Push Missing Rows → User Sheets Folder
 //                                same, across every sheet in a folder
 //
+//   Pull Missing Rows ← User Sheet
+//                                append captain-created rows from one
+//                                user sheet into the master
+//
+//   Pull Missing Rows ← User Sheets Folder
+//                                same, across every sheet in a folder
+//
+//   Pull Data ← User Sheet        pull captain-entered data into the
+//                                master using Pull Column Policy
+//
+//   Pull Data ← User Sheets Folder
+//                                same, across every sheet in a folder
+//
 //   Rename Columns → Folder      rename one header across every
 //                                sheet in a Drive folder
 //
-//   Set Up Config Tabs           format Settings & Column Mapping
-//                                with labels and instructions
+//   Set Up Config Tabs           format Settings, Column Mapping,
+//                                and Pull Column Policy
 //
 // Cell-fill operations automatically add any missing target columns
 // before filling. Row-append operations never modify or remove
@@ -41,6 +54,8 @@
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Sheet Smart')
+    .addItem('Open Dashboard', 'openSheetSmartDashboard')
+    .addSeparator()
     .addItem('Import → Master', 'importToMaster')
     .addItem('Import → Master (Dry Run)', 'importToMasterDryRun')
     .addSeparator()
@@ -56,11 +71,192 @@ function onOpen() {
     .addItem('Push Missing Rows → User Sheets Folder', 'pushMissingRowsToFolder')
     .addItem('Push Missing Rows → User Sheets Folder (Dry Run)', 'pushMissingRowsToFolderDryRun')
     .addSeparator()
+    .addItem('Pull Missing Rows ← User Sheet', 'pullMissingRowsFromUserSheet')
+    .addItem('Pull Missing Rows ← User Sheet (Dry Run)', 'pullMissingRowsFromUserSheetDryRun')
+    .addSeparator()
+    .addItem('Pull Missing Rows ← User Sheets Folder', 'pullMissingRowsFromFolder')
+    .addItem('Pull Missing Rows ← User Sheets Folder (Dry Run)', 'pullMissingRowsFromFolderDryRun')
+    .addSeparator()
+    .addItem('Pull Data ← User Sheet', 'pullDataFromUserSheet')
+    .addItem('Pull Data ← User Sheet (Dry Run)', 'pullDataFromUserSheetDryRun')
+    .addSeparator()
+    .addItem('Pull Data ← User Sheets Folder', 'pullDataFromFolder')
+    .addItem('Pull Data ← User Sheets Folder (Dry Run)', 'pullDataFromFolderDryRun')
+    .addSeparator()
     .addItem('Rename Columns → User Sheets Folder', 'renameColumnsInFolder')
     .addItem('Rename Columns → User Sheets Folder (Dry Run)', 'renameColumnsInFolderDryRun')
     .addSeparator()
     .addItem('Set Up Config Tabs', 'setupConfigTabs')
     .addToUi();
+}
+
+/**
+ * Opens the guided Sheet Smart sidebar. The existing menu operations remain
+ * available, but the sidebar presents the common tasks as named workflows.
+ */
+function openSheetSmartDashboard() {
+  var html = HtmlService.createHtmlOutputFromFile('Sidebar')
+    .setTitle('Sheet Smart');
+  SpreadsheetApp.getUi().showSidebar(html);
+}
+
+/**
+ * Returns sidebar-ready workflow summaries.
+ *
+ * @return {{ workflows: Array }}
+ */
+function getSheetSmartDashboardModel() {
+  var configSs = SpreadsheetApp.getActiveSpreadsheet();
+  var presets = readWorkflowPresets_(configSs);
+  var workflows = [];
+
+  for (var i = 0; i < presets.length; i++) {
+    if (!presets[i].enabled) continue;
+    workflows.push(buildWorkflowSidebarModel_(configSs, presets[i], false));
+  }
+
+  return { workflows: workflows };
+}
+
+/**
+ * Returns details and readiness checks for one workflow.
+ *
+ * @param {string} workflowId
+ * @return {Object}
+ */
+function getWorkflowDetails(workflowId) {
+  var configSs = SpreadsheetApp.getActiveSpreadsheet();
+  var preset = getWorkflowPreset_(configSs, workflowId);
+  if (!preset) throw new Error('Workflow "' + workflowId + '" was not found.');
+  return buildWorkflowSidebarModel_(configSs, preset, true);
+}
+
+/**
+ * Runs a workflow in dry-run mode from the sidebar.
+ *
+ * @param {string} workflowId
+ * @return {Object}
+ */
+function runWorkflowDryRun(workflowId) {
+  return runWorkflowFromSidebar_(workflowId, true);
+}
+
+/**
+ * Runs a workflow live from the sidebar.
+ *
+ * @param {string} workflowId
+ * @return {Object}
+ */
+function runWorkflowLive(workflowId) {
+  return runWorkflowFromSidebar_(workflowId, false);
+}
+
+/**
+ * Dispatches a named workflow to the matching backend operation.
+ *
+ * @param {string} workflowId
+ * @param {boolean} dryRun
+ * @return {Object}
+ */
+function runWorkflowFromSidebar_(workflowId, dryRun) {
+  var configSs = SpreadsheetApp.getActiveSpreadsheet();
+  var preset = getWorkflowPreset_(configSs, workflowId);
+  if (!preset) throw new Error('Workflow "' + workflowId + '" was not found.');
+  if (!preset.enabled) throw new Error('Workflow "' + preset.name + '" is disabled.');
+  if (preset.operation !== 'import_to_master') {
+    throw new Error('Workflow operation "' + preset.operation + '" is not supported by the sidebar yet.');
+  }
+
+  var logTab = dryRun ? 'Dry Run - ' + preset.name : 'Last Run - ' + preset.name;
+  var result = executeImportToMaster_(configSs, preset, dryRun, logTab);
+  result.workflowId = preset.id;
+  result.workflowName = preset.name;
+  result.mode = dryRun ? 'Dry Run' : 'Live Run';
+  return result;
+}
+
+/**
+ * Builds a compact workflow model for the sidebar. When includeChecks is true,
+ * spreadsheet/tab/header checks are performed so the UI can show readiness.
+ *
+ * @param {SpreadsheetApp.Spreadsheet} configSs
+ * @param {Object} preset
+ * @param {boolean} includeChecks
+ * @return {Object}
+ */
+function buildWorkflowSidebarModel_(configSs, preset, includeChecks) {
+  var checks = includeChecks ? validateImportWorkflow_(preset) : [];
+  return {
+    id: preset.id,
+    name: preset.name,
+    operation: preset.operation,
+    sourceTabName: preset.sourceTabName,
+    matchColumn: preset.matchColumn,
+    mappingCount: preset.columnMap.length,
+    mappings: preset.columnMap,
+    notes: preset.notes,
+    checks: checks,
+    ready: checks.length === 0 || checks.every(function (check) { return check.status !== 'error'; })
+  };
+}
+
+/**
+ * Validates the sidebar import workflow before it runs.
+ *
+ * @param {Object} preset
+ * @return {Array<{status: string, message: string}>}
+ */
+function validateImportWorkflow_(preset) {
+  var checks = [];
+
+  if (!preset.sourceId) checks.push({ status: 'error', message: 'Source spreadsheet is not set.' });
+  if (!preset.masterId) checks.push({ status: 'error', message: 'Master spreadsheet is not set.' });
+  if (!preset.matchColumn) checks.push({ status: 'error', message: 'Match column is not set.' });
+  if (preset.columnMap.length === 0) checks.push({ status: 'error', message: 'No column mappings are configured.' });
+  if (checks.length > 0) return checks;
+
+  try {
+    var sourceSs = SpreadsheetApp.openById(preset.sourceId);
+    var sourceSheet = getConfiguredSheet_(sourceSs, preset.sourceTabName);
+    var sourceData = sourceSheet.getDataRange().getValues();
+    var sourceHeaders = sourceData.length > 0 ? sourceData[0].map(function (h) { return String(h).trim(); }) : [];
+    var sourceColumns = preset.columnMap.map(function (m) { return m.source; });
+    sourceColumns.push(preset.matchColumn);
+    var missingSource = findMissingHeaders_(sourceHeaders, sourceColumns);
+
+    checks.push({ status: 'ok', message: 'Source tab found: ' + sourceSheet.getName() + ' (' + Math.max(sourceData.length - 1, 0) + ' data rows).' });
+    if (missingSource.length > 0) {
+      checks.push({ status: 'error', message: 'Source is missing: ' + missingSource.join(', ') + '.' });
+    } else {
+      checks.push({ status: 'ok', message: 'Source has the match column and mapped columns.' });
+    }
+  } catch (e) {
+    checks.push({ status: 'error', message: e.message });
+  }
+
+  try {
+    var masterSs = SpreadsheetApp.openById(preset.masterId);
+    var masterSheet = masterSs.getSheets()[0];
+    var masterData = masterSheet.getDataRange().getValues();
+    var masterHeaders = masterData.length > 0 ? masterData[0].map(function (h) { return String(h).trim(); }) : [];
+    var missingMasterMatch = findMissingHeaders_(masterHeaders, [preset.matchColumn]);
+    var targetColumns = preset.columnMap.map(function (m) { return m.target; });
+    var missingTargets = findMissingHeaders_(masterHeaders, targetColumns);
+
+    checks.push({ status: 'ok', message: 'Master found: ' + masterSs.getName() + ' (' + Math.max(masterData.length - 1, 0) + ' data rows).' });
+    if (missingMasterMatch.length > 0) {
+      checks.push({ status: 'error', message: 'Master is missing match column: ' + preset.matchColumn + '.' });
+    }
+    if (missingTargets.length > 0) {
+      checks.push({ status: 'warning', message: 'These target columns will be added if you run live: ' + missingTargets.join(', ') + '.' });
+    } else {
+      checks.push({ status: 'ok', message: 'Master already has all mapped target columns.' });
+    }
+  } catch (e2) {
+    checks.push({ status: 'error', message: e2.message });
+  }
+
+  return checks;
 }
 
 // -------  Import → Master  -------
@@ -86,37 +282,64 @@ function runImport_(dryRun) {
       'Column Mapping tab has no valid rows. Add at least one Source Column → Target Column pair.'
     );
 
-    var sourceSs     = SpreadsheetApp.openById(config.sourceId);
-    var sourceSheet  = sourceSs.getSheets()[0];
-    var sourceData   = sourceSheet.getDataRange().getValues();
-    var sourceHdrs   = sourceData[0].map(function (h) { return String(h).trim(); });
-    var sourceLookup = buildSourceLookup_(sourceData, sourceHdrs, config.matchColumn);
-
-    var masterSs    = SpreadsheetApp.openById(config.masterId);
-    var masterSheet = masterSs.getSheets()[0];
-
-    var targetCols  = config.columnMap.map(function (m) { return m.target; });
-    var addResult   = addColumnsToTarget_(masterSheet, targetCols, dryRun);
-    var virtualCols = addResult.added.map(function (a) { return a.column; });
-    var mergeResult = mergeIntoTarget_(masterSheet, sourceLookup, config.matchColumn, config.columnMap, dryRun, virtualCols);
-
     var logTab = dryRun ? 'Dry Run - Import' : 'Last Import';
-    var old = configSs.getSheetByName(logTab);
-    if (old) configSs.deleteSheet(old);
-    appendToSyncLog_(configSs, logTab, masterSs.getName(), addResult, mergeResult);
+    var summary = executeImportToMaster_(configSs, config, dryRun, logTab);
 
     var prefix = dryRun ? 'DRY RUN — Import → Master\n\n' : 'Import → Master complete.\n\n';
     ui.alert(
       prefix +
-      'Columns added: '               + addResult.added.length + '\n' +
-      'Cells filled: '                + mergeResult.filled.length + '\n' +
-      'Conflicts (not overwritten): ' + mergeResult.conflicts.length + '\n' +
-      'Errors: '                      + (addResult.errors.length + mergeResult.errors.length) + '\n\n' +
+      'Source tab: '                  + summary.sourceTab + '\n' +
+      'Columns added: '               + summary.columnsAdded + '\n' +
+      'Cells filled: '                + summary.cellsFilled + '\n' +
+      'Conflicts (not overwritten): ' + summary.conflicts + '\n' +
+      'Errors: '                      + summary.errors + '\n\n' +
       'See the "' + logTab + '" tab for details.'
     );
   } catch (e) {
     ui.alert('Import → Master failed:\n\n' + e.message);
   }
+}
+
+/**
+ * Shared Import -> Master implementation used by both the legacy menu and
+ * the sidebar workflows.
+ *
+ * @param {SpreadsheetApp.Spreadsheet} configSs
+ * @param {Object} config
+ * @param {boolean} dryRun
+ * @param {string} logTab
+ * @return {Object}
+ */
+function executeImportToMaster_(configSs, config, dryRun, logTab) {
+  var sourceSs     = SpreadsheetApp.openById(config.sourceId);
+  var sourceSheet  = getConfiguredSheet_(sourceSs, config.sourceTabName);
+  var sourceData   = sourceSheet.getDataRange().getValues();
+  if (sourceData.length === 0) throw new Error('Source tab "' + sourceSheet.getName() + '" is empty.');
+  var sourceHdrs   = sourceData[0].map(function (h) { return String(h).trim(); });
+  var sourceLookup = buildSourceLookup_(sourceData, sourceHdrs, config.matchColumn);
+
+  var masterSs    = SpreadsheetApp.openById(config.masterId);
+  var masterSheet = masterSs.getSheets()[0];
+
+  var targetCols  = config.columnMap.map(function (m) { return m.target; });
+  var addResult   = addColumnsToTarget_(masterSheet, targetCols, dryRun);
+  var virtualCols = addResult.added.map(function (a) { return a.column; });
+  var mergeResult = mergeIntoTarget_(masterSheet, sourceLookup, config.matchColumn, config.columnMap, dryRun, virtualCols);
+
+  var old = configSs.getSheetByName(logTab);
+  if (old) configSs.deleteSheet(old);
+  appendToSyncLog_(configSs, logTab, masterSs.getName(), addResult, mergeResult);
+
+  return {
+    sourceSpreadsheet: sourceSs.getName(),
+    sourceTab: sourceSheet.getName(),
+    targetSpreadsheet: masterSs.getName(),
+    logTab: logTab,
+    columnsAdded: addResult.added.length,
+    cellsFilled: mergeResult.filled.length,
+    conflicts: mergeResult.conflicts.length,
+    errors: addResult.errors.length + mergeResult.errors.length
+  };
 }
 
 // -------  Push → User Sheet  -------
@@ -389,6 +612,258 @@ function runPushMissingRowsToFolder_(dryRun) {
   }
 }
 
+// -------  Pull Missing Rows ← User Sheet  -------
+//
+// For a single user sheet: finds rows whose resident_id does not already
+// exist in the master and appends them to the master. Any user-sheet
+// columns missing from the master are added first so captain-created
+// fields are preserved.
+
+function pullMissingRowsFromUserSheet()       { runPullMissingRowsFromSheet_(false); }
+function pullMissingRowsFromUserSheetDryRun() { runPullMissingRowsFromSheet_(true);  }
+
+function runPullMissingRowsFromSheet_(dryRun) {
+  var ui = SpreadsheetApp.getUi();
+  try {
+    var configSs = SpreadsheetApp.getActiveSpreadsheet();
+    var config   = readMergeConfig_(configSs);
+
+    if (!config.masterId)    throw new Error('Master Spreadsheet is not set in the Settings tab.');
+    if (!config.userSheetId) throw new Error('User Sheet is not set in the Settings tab.');
+
+    var masterSs    = SpreadsheetApp.openById(config.masterId);
+    var masterSheet = masterSs.getSheets()[0];
+    var masterState = buildMasterPullState_(masterSheet);
+
+    var userSs    = SpreadsheetApp.openById(config.userSheetId);
+    var userSheet = userSs.getSheets()[0];
+
+    var logTab = dryRun ? 'Dry Run - Pull Missing Rows' : 'Last Pull - Missing Rows';
+    var old = configSs.getSheetByName(logTab);
+    if (old) configSs.deleteSheet(old);
+
+    var result = appendMissingRowsToMaster_(masterSheet, userSheet, userSs.getName(), dryRun, masterState);
+    appendToPullMissingRowsLog_(configSs, logTab, userSs.getName(), result);
+
+    var prefix = dryRun ? 'DRY RUN — Pull Missing Rows ← User Sheet\n\n' : 'Pull Missing Rows ← User Sheet complete.\n\n';
+    ui.alert(
+      prefix +
+      'Columns added to master: ' + result.columnsAdded.length + '\n' +
+      'Rows appended to master: ' + result.appended.length + '\n' +
+      'Skipped: '                + result.skipped.length + '\n' +
+      'Errors: '                 + result.errors.length + '\n\n' +
+      'See the "' + logTab + '" tab for details.'
+    );
+  } catch (e) {
+    ui.alert('Pull Missing Rows ← User Sheet failed:\n\n' + e.message);
+  }
+}
+
+// -------  Pull Missing Rows ← User Sheets Folder  -------
+//
+// Same as above but iterates every sheet in the configured folder.
+// Results for all sheets accumulate into one "Last Pull - Missing Rows"
+// log tab.
+
+function pullMissingRowsFromFolder()       { runPullMissingRowsFromFolder_(false); }
+function pullMissingRowsFromFolderDryRun() { runPullMissingRowsFromFolder_(true);  }
+
+function runPullMissingRowsFromFolder_(dryRun) {
+  var ui = SpreadsheetApp.getUi();
+  try {
+    var configSs = SpreadsheetApp.getActiveSpreadsheet();
+    var config   = readMergeConfig_(configSs);
+
+    if (!config.masterId) throw new Error('Master Spreadsheet is not set in the Settings tab.');
+    if (!config.folderId) throw new Error('User Sheets Folder is not set in the Settings tab.');
+
+    var masterSs    = SpreadsheetApp.openById(config.masterId);
+    var masterSheet = masterSs.getSheets()[0];
+    var masterState = buildMasterPullState_(masterSheet);
+
+    var folder = DriveApp.getFolderById(config.folderId);
+    var iter   = folder.getFilesByType(MimeType.GOOGLE_SHEETS);
+    var files  = [];
+    while (iter.hasNext()) files.push(iter.next());
+    files.sort(function (a, b) { return a.getName().localeCompare(b.getName()); });
+
+    var logTab = dryRun ? 'Dry Run - Pull Missing Rows' : 'Last Pull - Missing Rows';
+    var old = configSs.getSheetByName(logTab);
+    if (old) configSs.deleteSheet(old);
+
+    var totalColumnsAdded = 0, totalAppended = 0, totalSkipped = 0, totalErrors = 0;
+
+    for (var i = 0; i < files.length; i++) {
+      var file     = files[i];
+      var fileName = file.getName();
+      try {
+        var ss     = SpreadsheetApp.openById(file.getId());
+        var sheet  = ss.getSheets()[0];
+        var result = appendMissingRowsToMaster_(masterSheet, sheet, fileName, dryRun, masterState);
+
+        appendToPullMissingRowsLog_(configSs, logTab, fileName, result);
+
+        totalColumnsAdded += result.columnsAdded.length;
+        totalAppended     += result.appended.length;
+        totalSkipped      += result.skipped.length;
+        totalErrors       += result.errors.length;
+      } catch (e) {
+        appendToPullMissingRowsLog_(configSs, logTab, fileName, {
+          columnsAdded: [],
+          appended: [],
+          skipped: [],
+          errors: [{ message: e.message }]
+        });
+        totalErrors++;
+      }
+    }
+
+    var prefix = dryRun ? 'DRY RUN — Pull Missing Rows ← Folder\n\n' : 'Pull Missing Rows ← Folder complete.\n\n';
+    ui.alert(
+      prefix +
+      'Sheets processed: '          + files.length + '\n' +
+      'Total columns added: '       + totalColumnsAdded + '\n' +
+      'Total rows appended: '       + totalAppended + '\n' +
+      'Skipped: '                   + totalSkipped + '\n' +
+      'Errors: '                    + totalErrors + '\n\n' +
+      'See the "' + logTab + '" tab for details.'
+    );
+  } catch (e) {
+    ui.alert('Pull Missing Rows ← User Sheets Folder failed:\n\n' + e.message);
+  }
+}
+
+// -------  Pull Data ← User Sheet  -------
+//
+// Pulls captain-entered values from one user sheet into the master.
+// Existing master rows are updated according to Pull Column Policy;
+// rows missing from master are appended.
+
+function pullDataFromUserSheet()       { runPullDataFromSheet_(false); }
+function pullDataFromUserSheetDryRun() { runPullDataFromSheet_(true);  }
+
+function runPullDataFromSheet_(dryRun) {
+  var ui = SpreadsheetApp.getUi();
+  try {
+    var configSs = SpreadsheetApp.getActiveSpreadsheet();
+    var config   = readMergeConfig_(configSs);
+
+    if (!config.masterId)    throw new Error('Master Spreadsheet is not set in the Settings tab.');
+    if (!config.userSheetId) throw new Error('User Sheet is not set in the Settings tab.');
+
+    var masterSs    = SpreadsheetApp.openById(config.masterId);
+    var masterSheet = masterSs.getSheets()[0];
+    var pullState   = buildMasterPullDataState_(masterSheet);
+
+    var userSs    = SpreadsheetApp.openById(config.userSheetId);
+    var userSheet = userSs.getSheets()[0];
+
+    var logTab = dryRun ? 'Dry Run - Pull Data' : 'Last Pull Data';
+    var old = configSs.getSheetByName(logTab);
+    if (old) configSs.deleteSheet(old);
+
+    var result = pullDataIntoMaster_(masterSheet, userSheet, userSs.getName(), config.pullColumnPolicies, dryRun, pullState);
+    appendToPullDataLog_(configSs, logTab, userSs.getName(), result);
+
+    var prefix = dryRun ? 'DRY RUN — Pull Data ← User Sheet\n\n' : 'Pull Data ← User Sheet complete.\n\n';
+    ui.alert(
+      prefix +
+      'Columns added to master: ' + result.columnsAdded.length + '\n' +
+      'Rows appended to master: ' + result.appended.length + '\n' +
+      'Cells filled: '           + result.filled.length + '\n' +
+      'Cells overwritten: '      + result.overwritten.length + '\n' +
+      'Conflicts logged: '       + result.conflicts.length + '\n' +
+      'Skipped: '                + result.skipped.length + '\n' +
+      'Errors: '                 + result.errors.length + '\n\n' +
+      'See the "' + logTab + '" tab for details.'
+    );
+  } catch (e) {
+    ui.alert('Pull Data ← User Sheet failed:\n\n' + e.message);
+  }
+}
+
+// -------  Pull Data ← User Sheets Folder  -------
+//
+// Same as above but iterates every sheet in the configured folder.
+
+function pullDataFromFolder()       { runPullDataFromFolder_(false); }
+function pullDataFromFolderDryRun() { runPullDataFromFolder_(true);  }
+
+function runPullDataFromFolder_(dryRun) {
+  var ui = SpreadsheetApp.getUi();
+  try {
+    var configSs = SpreadsheetApp.getActiveSpreadsheet();
+    var config   = readMergeConfig_(configSs);
+
+    if (!config.masterId) throw new Error('Master Spreadsheet is not set in the Settings tab.');
+    if (!config.folderId) throw new Error('User Sheets Folder is not set in the Settings tab.');
+
+    var masterSs    = SpreadsheetApp.openById(config.masterId);
+    var masterSheet = masterSs.getSheets()[0];
+    var pullState   = buildMasterPullDataState_(masterSheet);
+
+    var folder = DriveApp.getFolderById(config.folderId);
+    var iter   = folder.getFilesByType(MimeType.GOOGLE_SHEETS);
+    var files  = [];
+    while (iter.hasNext()) files.push(iter.next());
+    files.sort(function (a, b) { return a.getName().localeCompare(b.getName()); });
+
+    var logTab = dryRun ? 'Dry Run - Pull Data' : 'Last Pull Data';
+    var old = configSs.getSheetByName(logTab);
+    if (old) configSs.deleteSheet(old);
+
+    var totalColumnsAdded = 0, totalAppended = 0, totalFilled = 0, totalOverwritten = 0;
+    var totalConflicts = 0, totalSkipped = 0, totalErrors = 0;
+
+    for (var i = 0; i < files.length; i++) {
+      var file     = files[i];
+      var fileName = file.getName();
+      try {
+        var ss     = SpreadsheetApp.openById(file.getId());
+        var sheet  = ss.getSheets()[0];
+        var result = pullDataIntoMaster_(masterSheet, sheet, fileName, config.pullColumnPolicies, dryRun, pullState);
+
+        appendToPullDataLog_(configSs, logTab, fileName, result);
+
+        totalColumnsAdded += result.columnsAdded.length;
+        totalAppended     += result.appended.length;
+        totalFilled       += result.filled.length;
+        totalOverwritten  += result.overwritten.length;
+        totalConflicts    += result.conflicts.length;
+        totalSkipped      += result.skipped.length;
+        totalErrors       += result.errors.length;
+      } catch (e) {
+        appendToPullDataLog_(configSs, logTab, fileName, {
+          columnsAdded: [],
+          appended: [],
+          filled: [],
+          overwritten: [],
+          conflicts: [],
+          skipped: [],
+          errors: [{ message: e.message }]
+        });
+        totalErrors++;
+      }
+    }
+
+    var prefix = dryRun ? 'DRY RUN — Pull Data ← Folder\n\n' : 'Pull Data ← Folder complete.\n\n';
+    ui.alert(
+      prefix +
+      'Sheets processed: '          + files.length + '\n' +
+      'Total columns added: '       + totalColumnsAdded + '\n' +
+      'Total rows appended: '       + totalAppended + '\n' +
+      'Total cells filled: '        + totalFilled + '\n' +
+      'Total cells overwritten: '   + totalOverwritten + '\n' +
+      'Conflicts logged: '          + totalConflicts + '\n' +
+      'Skipped: '                   + totalSkipped + '\n' +
+      'Errors: '                    + totalErrors + '\n\n' +
+      'See the "' + logTab + '" tab for details.'
+    );
+  } catch (e) {
+    ui.alert('Pull Data ← User Sheets Folder failed:\n\n' + e.message);
+  }
+}
+
 // -------  Rename Columns → User Sheets Folder  -------
 //
 // Renames a single header across every Google Sheet in the
@@ -460,16 +935,16 @@ function runRenameColumnsInFolder_(dryRun) {
 
 // -------  Set Up Config Tabs  -------
 //
-// Formats the Settings and Column Mapping tabs with labels,
-// column headers, and plain-English instructions. Run this once
-// when setting up a new Sheet Smart Config spreadsheet, or any
-// time you want to restore the correct structure.
+// Formats the Settings, Column Mapping, and Pull Column Policy tabs
+// with labels, column headers, and plain-English instructions. Run
+// this once when setting up a new Sheet Smart Config spreadsheet, or
+// any time you want to restore the correct structure.
 
 function setupConfigTabs() {
   var ui = SpreadsheetApp.getUi();
   var response = ui.alert(
     'Set Up Config Tabs',
-    'This will format the Settings and Column Mapping tabs with labels and instructions.\n\n' +
+    'This will format the Settings, Column Mapping, and Pull Column Policy tabs with labels and instructions.\n\n' +
     '• Existing values in the Settings tab (column B) will be preserved.\n' +
     '• The Column Mapping tab header row will be updated; existing mapping rows will not change.\n\n' +
     'Continue?',
@@ -480,13 +955,17 @@ function setupConfigTabs() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   setupSettingsTab_(ss);
   setupColumnMappingTab_(ss);
+  setupPullColumnPolicyTab_(ss);
+  setupWorkflowPresetsTab_(ss);
 
   ui.alert(
     'Config tabs are ready.\n\n' +
     'Next steps:\n' +
     '1. Fill in the Value column in the Settings tab.\n' +
     '2. Add your column pairs to the Column Mapping tab.\n' +
-    '3. Run a Dry Run first to preview results before a live operation.'
+    '3. Add pull policies for captain-entered columns in the Pull Column Policy tab.\n' +
+    '4. Review or edit task presets in the Workflow Presets tab.\n' +
+    '5. Run a Dry Run first to preview results before a live operation.'
   );
 }
 
@@ -518,7 +997,7 @@ function setupSettingsTab_(ss) {
       'Master Spreadsheet',
       existingValues['Master Spreadsheet'] || '',
       'Your master spreadsheet ID. This is the DESTINATION for "Import → Master" ' +
-      'and the SOURCE for both "Push" operations. ' +
+      'and "Pull Missing Rows", and the SOURCE for "Push" operations. ' +
       'Find it in the URL: docs.google.com/spreadsheets/d/[COPY THIS]/edit'
     ],
     [
@@ -529,17 +1008,23 @@ function setupSettingsTab_(ss) {
       'Find it in the URL: docs.google.com/spreadsheets/d/[COPY THIS]/edit'
     ],
     [
+      'Source Tab Name',
+      existingValues['Source Tab Name'] || '',
+      'Optional tab name inside the External Source spreadsheet. If blank, ' +
+      '"Import → Master" uses the first tab. For sales imports, use "Sales Rollup by APN".'
+    ],
+    [
       'User Sheet',
       existingValues['User Sheet'] || '',
-      'ID of a single user spreadsheet to push master data TO. ' +
-      'Only used by "Push → User Sheet". ' +
+      'ID of a single user spreadsheet to push master data TO or pull missing rows FROM. ' +
+      'Only used by single-sheet Push and Pull operations. ' +
       'Find it in the URL: docs.google.com/spreadsheets/d/[COPY THIS]/edit'
     ],
     [
       'User Sheets Folder',
       existingValues['User Sheets Folder'] || existingValues['Target Folder'] || '',
       'ID of the Drive folder containing all user sheets. ' +
-      'Only used by "Push → User Sheets Folder". ' +
+      'Used by folder-wide Push, Pull, and Rename operations. ' +
       'Find it at the end of the folder URL: drive.google.com/drive/folders/[COPY THIS]'
     ],
     [
@@ -622,4 +1107,129 @@ function setupColumnMappingTab_(ss) {
 
   tab.setColumnWidth(1, 240);
   tab.setColumnWidth(2, 240);
+}
+
+/**
+ * Writes (or updates) the Pull Column Policy tab header row with
+ * formatting and examples. Existing policy rows are preserved.
+ *
+ * @param {SpreadsheetApp.Spreadsheet} ss
+ */
+function setupPullColumnPolicyTab_(ss) {
+  var tab = ss.getSheetByName('Pull Column Policy');
+  if (!tab) tab = ss.insertSheet('Pull Column Policy');
+
+  var existingData = tab.getDataRange().getValues();
+  var hasExistingRows = existingData.length > 1;
+
+  tab.getRange(1, 1, 1, 3).setValues([['Column Name', 'Policy', 'Notes']]);
+
+  var headerRange = tab.getRange(1, 1, 1, 3);
+  headerRange.setFontWeight('bold');
+  headerRange.setBackground('#e8eaf6');
+  tab.setFrozenRows(1);
+
+  tab.getRange(1, 1).setNote(
+    'Controls Pull Data operations into the master.\n\n' +
+    'Policy values:\n' +
+    '• fill_blank: write captain value only when master is blank\n' +
+    '• overwrite: replace master value when captain has a non-blank value\n' +
+    '• conflict: log differences without writing\n' +
+    '• never: never pull this column\n\n' +
+    'Unlisted columns default to conflict. resident_id is always protected.'
+  );
+
+  if (!hasExistingRows) {
+    var examples = [
+      ['resident_id', 'never', 'Protected identity column; always forced to never.'],
+      ['ZoneName', 'conflict', 'Review zone differences instead of changing master automatically.'],
+      ['Resident Name', 'fill_blank', 'Fill missing master names but do not replace existing values.'],
+      ['Damage', 'overwrite', 'Example captain-owned field; change to match your real policy.'],
+      ['Person Notes', 'overwrite', 'Example notes field entered by captains.']
+    ];
+    tab.getRange(2, 1, examples.length, 3).setValues(examples);
+  }
+
+  tab.setColumnWidth(1, 240);
+  tab.setColumnWidth(2, 140);
+  tab.setColumnWidth(3, 520);
+  tab.getRange(2, 3, Math.max(tab.getMaxRows() - 1, 1), 1).setWrap(true);
+}
+
+/**
+ * Creates the Workflow Presets tab used by the guided sidebar. Existing
+ * workflow rows are preserved; a sales import preset is added only when the
+ * tab has no presets yet.
+ *
+ * @param {SpreadsheetApp.Spreadsheet} ss
+ */
+function setupWorkflowPresetsTab_(ss) {
+  var tab = ss.getSheetByName('Workflow Presets');
+  if (!tab) tab = ss.insertSheet('Workflow Presets');
+
+  var headers = [
+    'Workflow ID',
+    'Workflow Name',
+    'Operation',
+    'Enabled',
+    'Source Spreadsheet',
+    'Source Tab',
+    'Master Spreadsheet',
+    'Match Column',
+    'Column Mappings',
+    'Notes'
+  ];
+
+  var existingData = tab.getDataRange().getValues();
+  var hasExistingRows = existingData.length > 1 && String(existingData[1][0] || existingData[1][1] || '').trim() !== '';
+
+  tab.getRange(1, 1, 1, headers.length).setValues([headers]);
+  var headerRange = tab.getRange(1, 1, 1, headers.length);
+  headerRange.setFontWeight('bold');
+  headerRange.setBackground('#e8eaf6');
+  tab.setFrozenRows(1);
+
+  tab.getRange(1, 9).setNote(
+    'One mapping per line. Use either:\n\n' +
+    'Source Header -> Target Header\n' +
+    'or\n' +
+    'Source Header | Target Header\n\n' +
+    'If source and target use the same header, write it on both sides.'
+  );
+
+  if (!hasExistingRows) {
+    var settings = readMergeConfig_(ss);
+    var defaultMappings = [
+      'Address - Sold Since Fire -> Address - Sold Since Fire',
+      'Sales History -> Sales History',
+      'Latest Sale Date -> Latest Sale Date',
+      'Latest Sale Price -> Latest Sale Price',
+      'Latest New Owner -> Latest New Owner'
+    ].join('\n');
+
+    tab.getRange(2, 1, 1, headers.length).setValues([[
+      'sales-import',
+      'Update Master From Sales Tracker',
+      'import_to_master',
+      'Yes',
+      settings.sourceId || '',
+      settings.sourceTabName || 'Sales Rollup by APN',
+      settings.masterId || '',
+      settings.matchColumn || 'APN',
+      defaultMappings,
+      'Imports the one-row-per-APN sales rollup into the master. Start with Dry Run.'
+    ]]);
+  }
+
+  tab.setColumnWidth(1, 150);
+  tab.setColumnWidth(2, 260);
+  tab.setColumnWidth(3, 160);
+  tab.setColumnWidth(4, 90);
+  tab.setColumnWidth(5, 280);
+  tab.setColumnWidth(6, 190);
+  tab.setColumnWidth(7, 280);
+  tab.setColumnWidth(8, 130);
+  tab.setColumnWidth(9, 360);
+  tab.setColumnWidth(10, 360);
+  tab.getRange(2, 9, Math.max(tab.getMaxRows() - 1, 1), 2).setWrap(true);
 }
