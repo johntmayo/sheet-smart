@@ -2,7 +2,7 @@
 
 ## Problem
 
-A master Google Spreadsheet is used to generate ~55 individual spreadsheets, each delivered to a different user or team. Over time, two kinds of drift have occurred:
+A master Google Spreadsheet is used to generate ~125 individual spreadsheets, each delivered to a different user or team. Over time, two kinds of drift have occurred:
 
 1. **Structural drift.** The master has evolved — columns added, renamed, reordered — but the already-shipped sheets were never updated to match.
 2. **Content drift.** Users have edited their individual sheets. Some edits are legitimate local data; others are accidental changes to shared fields.

@@ -85,8 +85,10 @@ function readWorkflowPresets_(configSpreadsheet) {
       sourceId: getRowValueByHeader_(row, headers, 'Source Spreadsheet'),
       sourceTabName: getRowValueByHeader_(row, headers, 'Source Tab'),
       masterId: getRowValueByHeader_(row, headers, 'Master Spreadsheet'),
+      folderId: getRowValueByHeader_(row, headers, 'User Sheets Folder') || getRowValueByHeader_(row, headers, 'Target Folder'),
       matchColumn: getRowValueByHeader_(row, headers, 'Match Column'),
       columnMap: parseWorkflowColumnMap_(getRowValueByHeader_(row, headers, 'Column Mappings')),
+      importColumnPolicies: parseWorkflowColumnPolicies_(getRowValueByHeader_(row, headers, 'Column Policies')),
       notes: getRowValueByHeader_(row, headers, 'Notes')
     };
 
@@ -153,6 +155,34 @@ function parseWorkflowColumnMap_(raw) {
   }
 
   return mappings;
+}
+
+/**
+ * Parses a multiline "Column -> Policy" list from a workflow preset.
+ * Policies use the same labels as Pull Column Policy.
+ *
+ * @param {string} raw
+ * @return {Object}
+ */
+function parseWorkflowColumnPolicies_(raw) {
+  var text = String(raw || '').trim();
+  var policies = {};
+  if (text === '') return policies;
+
+  var lines = text.split(/\r?\n/);
+  for (var i = 0; i < lines.length; i++) {
+    var line = String(lines[i] || '').trim();
+    if (line === '') continue;
+
+    var parts = line.indexOf('->') !== -1 ? line.split('->') : line.split('|');
+    var column = String(parts[0] || '').trim();
+    var policy = normalizePullPolicy_(parts.length > 1 ? parts.slice(1).join('->') : '');
+
+    if (column === '' || !policy) continue;
+    policies[column] = policy;
+  }
+
+  return policies;
 }
 
 /**
@@ -277,6 +307,72 @@ function parseSensitiveColumns_(raw) {
   return String(raw).split(',')
     .map(function (s) { return s.trim(); })
     .filter(function (s) { return s !== ''; });
+}
+
+/**
+ * Compares cell values by meaning instead of raw JavaScript identity. This
+ * avoids false conflicts when Sheets returns equivalent dates as different
+ * Date instances or as a formatted date string.
+ *
+ * @param {*} left
+ * @param {*} right
+ * @return {boolean}
+ */
+function cellValuesEqual_(left, right) {
+  var leftKey = normalizeCellValueForCompare_(left);
+  var rightKey = normalizeCellValueForCompare_(right);
+  return leftKey === rightKey;
+}
+
+/**
+ * Produces a stable comparison key for common spreadsheet values.
+ *
+ * @param {*} value
+ * @return {string}
+ */
+function normalizeCellValueForCompare_(value) {
+  if (value === null || value === undefined || value === '') return 'blank:';
+  if (Object.prototype.toString.call(value) === '[object Date]' && !isNaN(value.getTime())) {
+    return 'date:' + value.getFullYear() + '-' + pad2_(value.getMonth() + 1) + '-' + pad2_(value.getDate());
+  }
+  if (typeof value === 'number') return 'number:' + String(value);
+  if (typeof value === 'boolean') return 'boolean:' + String(value);
+
+  var text = String(value).trim();
+  var parsedDate = parseDisplayDate_(text);
+  if (parsedDate) return parsedDate;
+  return 'string:' + text;
+}
+
+/**
+ * Parses common Sheets display dates like M/D/YYYY or YYYY-MM-DD.
+ *
+ * @param {string} text
+ * @return {string}
+ */
+function parseDisplayDate_(text) {
+  var match = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (match) {
+    return 'date:' + match[3] + '-' + pad2_(match[1]) + '-' + pad2_(match[2]);
+  }
+
+  match = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (match) {
+    return 'date:' + match[1] + '-' + pad2_(match[2]) + '-' + pad2_(match[3]);
+  }
+
+  return '';
+}
+
+/**
+ * Left-pads month/day numbers used in comparison keys.
+ *
+ * @param {*} value
+ * @return {string}
+ */
+function pad2_(value) {
+  var text = String(value);
+  return text.length === 1 ? '0' + text : text;
 }
 
 /**
@@ -421,7 +517,7 @@ function mergeIntoTarget_(targetSheet, sourceLookup, matchColumn, columnMap, dry
             wasCheckbox: (targetVal === false)
           });
         }
-      } else if (!targetBlank && !sourceBlank && targetVal !== sourceVal) {
+      } else if (!targetBlank && !sourceBlank && !cellValuesEqual_(targetVal, sourceVal)) {
         conflicts.push({
           row: r + 1,
           column: columnMap[c].target,
@@ -444,6 +540,167 @@ function mergeIntoTarget_(targetSheet, sourceLookup, matchColumn, columnMap, dry
   }
 
   return { filled: filled, conflicts: conflicts, errors: errors };
+}
+
+/**
+ * Merges source data into a target sheet using per-column import policies.
+ * This is used by sidebar workflows that need a dry-run review of proposed
+ * overwrites before a live write.
+ *
+ * @param {SpreadsheetApp.Sheet} targetSheet
+ * @param {Object} sourceLookup
+ * @param {string} matchColumn
+ * @param {Array<{source: string, target: string}>} columnMap
+ * @param {Object} columnPolicies
+ * @param {boolean} dryRun
+ * @param {Array<string>=} virtualAddedColumns
+ * @return {{ filled: Array, overwritten: Array, conflicts: Array, skipped: Array, errors: Array }}
+ */
+function mergeIntoTargetWithPolicies_(targetSheet, sourceLookup, matchColumn, columnMap, columnPolicies, dryRun, virtualAddedColumns) {
+  var filled = [];
+  var overwritten = [];
+  var conflicts = [];
+  var skipped = [];
+  var errors = [];
+  var policies = columnPolicies || {};
+
+  var data = targetSheet.getDataRange().getValues();
+  if (data.length === 0) {
+    errors.push({ row: 0, column: '', existingValue: '', newValue: 'Target sheet is empty' });
+    return { filled: filled, overwritten: overwritten, conflicts: conflicts, skipped: skipped, errors: errors };
+  }
+
+  var targetHeaders = data[0].map(function (h) { return String(h).trim(); });
+  if (virtualAddedColumns && virtualAddedColumns.length) {
+    for (var v = 0; v < virtualAddedColumns.length; v++) {
+      var vcol = String(virtualAddedColumns[v]).trim();
+      if (vcol !== '' && targetHeaders.indexOf(vcol) === -1) {
+        targetHeaders.push(vcol);
+      }
+    }
+  }
+
+  var matchIdx = targetHeaders.indexOf(matchColumn);
+  if (matchIdx === -1) {
+    errors.push({
+      row: 0,
+      column: matchColumn,
+      existingValue: '',
+      newValue: 'Match column "' + matchColumn + '" not found in target headers'
+    });
+    return { filled: filled, overwritten: overwritten, conflicts: conflicts, skipped: skipped, errors: errors };
+  }
+
+  var targetColIndices = [];
+  for (var m = 0; m < columnMap.length; m++) {
+    var tgtIdx = targetHeaders.indexOf(columnMap[m].target);
+    if (tgtIdx === -1) {
+      errors.push({
+        row: 0,
+        column: columnMap[m].target,
+        existingValue: '',
+        newValue: 'Mapped target column "' + columnMap[m].target + '" not found in target sheet'
+      });
+      targetColIndices.push(-1);
+    } else {
+      targetColIndices.push(tgtIdx);
+    }
+  }
+
+  var writeQueue = [];
+  for (var r = 1; r < data.length; r++) {
+    var matchKey = String(data[r][matchIdx]).trim();
+    if (matchKey === '' || matchKey === 'undefined' || matchKey === 'null') continue;
+
+    var sourceRow = sourceLookup[matchKey];
+    if (!sourceRow) continue;
+
+    for (var c = 0; c < columnMap.length; c++) {
+      if (targetColIndices[c] === -1) continue;
+
+      var mapping = columnMap[c];
+      var policy = policies[mapping.target] || policies[mapping.source] || 'fill_blank';
+      var sourceVal = sourceRow[mapping.source];
+      if (typeof sourceVal === 'string' && sourceVal.toLowerCase() === 'true') {
+        sourceVal = true;
+      } else if (typeof sourceVal === 'string' && sourceVal.toLowerCase() === 'false') {
+        sourceVal = false;
+      }
+
+      var targetVal = data[r][targetColIndices[c]];
+      var targetBlank = (targetVal === '' || targetVal === null || targetVal === undefined || targetVal === false);
+      var sourceBlank = (sourceVal === '' || sourceVal === null || sourceVal === undefined);
+      if (sourceBlank) continue;
+
+      if (policy === 'never') {
+        skipped.push({
+          row: r + 1,
+          column: mapping.target,
+          existingValue: targetVal,
+          newValue: sourceVal,
+          reason: 'Policy is never'
+        });
+        continue;
+      }
+
+      if (cellValuesEqual_(targetVal, sourceVal)) continue;
+
+      if (targetBlank) {
+        filled.push({
+          row: r + 1,
+          column: mapping.target,
+          existingValue: '',
+          newValue: sourceVal,
+          policy: policy
+        });
+        if (!dryRun) {
+          writeQueue.push({
+            row: r + 1,
+            col: targetColIndices[c] + 1,
+            val: sourceVal,
+            wasCheckbox: (targetVal === false)
+          });
+        }
+      } else if (policy === 'overwrite') {
+        overwritten.push({
+          row: r + 1,
+          column: mapping.target,
+          existingValue: targetVal,
+          newValue: sourceVal,
+          policy: policy
+        });
+        if (!dryRun) {
+          writeQueue.push({
+            row: r + 1,
+            col: targetColIndices[c] + 1,
+            val: sourceVal,
+            wasCheckbox: (targetVal === false)
+          });
+        }
+      } else {
+        conflicts.push({
+          row: r + 1,
+          column: mapping.target,
+          existingValue: targetVal,
+          newValue: sourceVal,
+          policy: policy
+        });
+      }
+    }
+  }
+
+  if (!dryRun) {
+    for (var w = 0; w < writeQueue.length; w++) {
+      var cell = targetSheet.getRange(writeQueue[w].row, writeQueue[w].col);
+      if (writeQueue[w].wasCheckbox) {
+        cell.clearDataValidations();
+        cell.setNumberFormat('General');
+      }
+      cell.setValue(writeQueue[w].val);
+    }
+  }
+
+  return { filled: filled, overwritten: overwritten, conflicts: conflicts, skipped: skipped, errors: errors };
 }
 
 /**
@@ -587,9 +844,21 @@ function appendToSyncLog_(spreadsheet, tabName, sheetName, addResult, mergeResul
     var f = mergeResult.filled[k];
     newRows.push(['Filled', sheetName, f.row, f.column, '(blank)', f.newValue]);
   }
+  if (mergeResult.overwritten) {
+    for (var o = 0; o < mergeResult.overwritten.length; o++) {
+      var ow = mergeResult.overwritten[o];
+      newRows.push(['Overwritten', sheetName, ow.row, ow.column, ow.existingValue, ow.newValue]);
+    }
+  }
   for (var l = 0; l < mergeResult.conflicts.length; l++) {
     var c = mergeResult.conflicts[l];
     newRows.push(['Conflict', sheetName, c.row, c.column, c.existingValue, c.newValue]);
+  }
+  if (mergeResult.skipped) {
+    for (var s = 0; s < mergeResult.skipped.length; s++) {
+      var skipped = mergeResult.skipped[s];
+      newRows.push(['Skipped', sheetName, skipped.row, skipped.column, skipped.existingValue, skipped.reason || 'Skipped by policy']);
+    }
   }
   for (var m = 0; m < mergeResult.errors.length; m++) {
     var e = mergeResult.errors[m];
@@ -1300,7 +1569,7 @@ function pullDataIntoMaster_(masterSheet, sourceSheet, sourceName, pullColumnPol
         continue;
       }
 
-      if (masterVal === sourceVal) continue;
+      if (cellValuesEqual_(masterVal, sourceVal)) continue;
 
       if (policy === 'fill_blank') {
         if (masterBlank) {

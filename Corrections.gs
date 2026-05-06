@@ -163,12 +163,16 @@ function runWorkflowFromSidebar_(workflowId, dryRun) {
   var preset = getWorkflowPreset_(configSs, workflowId);
   if (!preset) throw new Error('Workflow "' + workflowId + '" was not found.');
   if (!preset.enabled) throw new Error('Workflow "' + preset.name + '" is disabled.');
-  if (preset.operation !== 'import_to_master') {
-    throw new Error('Workflow operation "' + preset.operation + '" is not supported by the sidebar yet.');
-  }
 
   var logTab = dryRun ? 'Dry Run - ' + preset.name : 'Last Run - ' + preset.name;
-  var result = executeImportToMaster_(configSs, preset, dryRun, logTab);
+  var result;
+  if (preset.operation === 'import_to_master') {
+    result = executeImportToMaster_(configSs, preset, dryRun, logTab);
+  } else if (preset.operation === 'push_to_folder') {
+    result = executePushToFolderWorkflow_(configSs, preset, dryRun, logTab);
+  } else {
+    throw new Error('Workflow operation "' + preset.operation + '" is not supported by the sidebar yet.');
+  }
   result.workflowId = preset.id;
   result.workflowName = preset.name;
   result.mode = dryRun ? 'Dry Run' : 'Live Run';
@@ -185,19 +189,49 @@ function runWorkflowFromSidebar_(workflowId, dryRun) {
  * @return {Object}
  */
 function buildWorkflowSidebarModel_(configSs, preset, includeChecks) {
-  var checks = includeChecks ? validateImportWorkflow_(preset) : [];
+  var checks = includeChecks ? validateWorkflow_(preset) : [];
   return {
     id: preset.id,
     name: preset.name,
     operation: preset.operation,
     sourceTabName: preset.sourceTabName,
+    sourceLabel: getWorkflowSourceLabel_(preset),
     matchColumn: preset.matchColumn,
     mappingCount: preset.columnMap.length,
-    mappings: preset.columnMap,
+    mappings: preset.columnMap.map(function (mapping) {
+      return {
+        source: mapping.source,
+        target: mapping.target,
+        policy: preset.importColumnPolicies[mapping.target] || preset.importColumnPolicies[mapping.source] || 'fill_blank'
+      };
+    }),
     notes: preset.notes,
     checks: checks,
     ready: checks.length === 0 || checks.every(function (check) { return check.status !== 'error'; })
   };
+}
+
+/**
+ * Routes workflow validation to the operation-specific checker.
+ *
+ * @param {Object} preset
+ * @return {Array<{status: string, message: string}>}
+ */
+function validateWorkflow_(preset) {
+  if (preset.operation === 'import_to_master') return validateImportWorkflow_(preset);
+  if (preset.operation === 'push_to_folder') return validatePushToFolderWorkflow_(preset);
+  return [{ status: 'error', message: 'Unsupported workflow operation: ' + preset.operation }];
+}
+
+/**
+ * Returns a short source label for the sidebar details panel.
+ *
+ * @param {Object} preset
+ * @return {string}
+ */
+function getWorkflowSourceLabel_(preset) {
+  if (preset.operation === 'push_to_folder') return 'Master spreadsheet';
+  return preset.sourceTabName || '(first tab)';
 }
 
 /**
@@ -259,6 +293,85 @@ function validateImportWorkflow_(preset) {
   return checks;
 }
 
+/**
+ * Validates the sidebar Master -> folder push workflow before it runs.
+ *
+ * @param {Object} preset
+ * @return {Array<{status: string, message: string}>}
+ */
+function validatePushToFolderWorkflow_(preset) {
+  var checks = [];
+
+  if (!preset.masterId) checks.push({ status: 'error', message: 'Master spreadsheet is not set.' });
+  if (!preset.folderId) checks.push({ status: 'error', message: 'User sheets folder is not set.' });
+  if (!preset.matchColumn) checks.push({ status: 'error', message: 'Match column is not set.' });
+  if (preset.columnMap.length === 0) checks.push({ status: 'error', message: 'No column mappings are configured.' });
+  if (checks.length > 0) return checks;
+
+  var sourceColumns = preset.columnMap.map(function (m) { return m.source; });
+  sourceColumns.push(preset.matchColumn);
+
+  try {
+    var masterSs = SpreadsheetApp.openById(preset.masterId);
+    var masterSheet = masterSs.getSheets()[0];
+    var masterData = masterSheet.getDataRange().getValues();
+    var masterHeaders = masterData.length > 0 ? masterData[0].map(function (h) { return String(h).trim(); }) : [];
+    var missingMaster = findMissingHeaders_(masterHeaders, sourceColumns);
+
+    checks.push({ status: 'ok', message: 'Master found: ' + masterSs.getName() + ' (' + Math.max(masterData.length - 1, 0) + ' data rows).' });
+    if (missingMaster.length > 0) {
+      checks.push({ status: 'error', message: 'Master is missing: ' + missingMaster.join(', ') + '.' });
+    } else {
+      checks.push({ status: 'ok', message: 'Master has the match column and mapped source columns.' });
+    }
+  } catch (e) {
+    checks.push({ status: 'error', message: e.message });
+  }
+
+  try {
+    var folder = DriveApp.getFolderById(preset.folderId);
+    var iter = folder.getFilesByType(MimeType.GOOGLE_SHEETS);
+    var files = [];
+    while (iter.hasNext()) files.push(iter.next());
+    files.sort(function (a, b) { return a.getName().localeCompare(b.getName()); });
+
+    checks.push({ status: files.length > 0 ? 'ok' : 'warning', message: 'Folder found with ' + files.length + ' Google Sheets.' });
+    if (files.length === 0) return checks;
+
+    var targetColumns = preset.columnMap.map(function (m) { return m.target; });
+    var missingMatchSheets = [];
+    var sheetsMissingTargets = 0;
+    for (var i = 0; i < files.length; i++) {
+      var ss = SpreadsheetApp.openById(files[i].getId());
+      var sheet = ss.getSheets()[0];
+      var data = sheet.getDataRange().getValues();
+      var headers = data.length > 0 ? data[0].map(function (h) { return String(h).trim(); }) : [];
+
+      if (headers.indexOf(preset.matchColumn) === -1) {
+        missingMatchSheets.push(files[i].getName());
+      }
+      if (findMissingHeaders_(headers, targetColumns).length > 0) {
+        sheetsMissingTargets++;
+      }
+    }
+
+    if (missingMatchSheets.length > 0) {
+      checks.push({ status: 'error', message: missingMatchSheets.length + ' sheet(s) are missing match column ' + preset.matchColumn + '. First: ' + missingMatchSheets[0] + '.' });
+    } else {
+      checks.push({ status: 'ok', message: 'All folder sheets have the match column.' });
+    }
+    if (sheetsMissingTargets > 0) {
+      checks.push({ status: 'warning', message: sheetsMissingTargets + ' sheet(s) are missing one or more target columns; live run will add them.' });
+    } else {
+      checks.push({ status: 'ok', message: 'All folder sheets already have the mapped target columns.' });
+    }
+  } catch (e2) {
+    checks.push({ status: 'error', message: e2.message });
+  }
+
+  return checks;
+}
+
 // -------  Import → Master  -------
 //
 // Reads data FROM the External Source spreadsheet and writes it
@@ -291,7 +404,9 @@ function runImport_(dryRun) {
       'Source tab: '                  + summary.sourceTab + '\n' +
       'Columns added: '               + summary.columnsAdded + '\n' +
       'Cells filled: '                + summary.cellsFilled + '\n' +
+      'Cells overwritten: '           + summary.cellsOverwritten + '\n' +
       'Conflicts (not overwritten): ' + summary.conflicts + '\n' +
+      'Skipped: '                     + summary.skipped + '\n' +
       'Errors: '                      + summary.errors + '\n\n' +
       'See the "' + logTab + '" tab for details.'
     );
@@ -324,7 +439,10 @@ function executeImportToMaster_(configSs, config, dryRun, logTab) {
   var targetCols  = config.columnMap.map(function (m) { return m.target; });
   var addResult   = addColumnsToTarget_(masterSheet, targetCols, dryRun);
   var virtualCols = addResult.added.map(function (a) { return a.column; });
-  var mergeResult = mergeIntoTarget_(masterSheet, sourceLookup, config.matchColumn, config.columnMap, dryRun, virtualCols);
+  var hasImportPolicies = config.importColumnPolicies && Object.keys(config.importColumnPolicies).length > 0;
+  var mergeResult = hasImportPolicies
+    ? mergeIntoTargetWithPolicies_(masterSheet, sourceLookup, config.matchColumn, config.columnMap, config.importColumnPolicies, dryRun, virtualCols)
+    : mergeIntoTarget_(masterSheet, sourceLookup, config.matchColumn, config.columnMap, dryRun, virtualCols);
 
   var old = configSs.getSheetByName(logTab);
   if (old) configSs.deleteSheet(old);
@@ -337,8 +455,98 @@ function executeImportToMaster_(configSs, config, dryRun, logTab) {
     logTab: logTab,
     columnsAdded: addResult.added.length,
     cellsFilled: mergeResult.filled.length,
+    cellsOverwritten: mergeResult.overwritten ? mergeResult.overwritten.length : 0,
     conflicts: mergeResult.conflicts.length,
+    skipped: mergeResult.skipped ? mergeResult.skipped.length : 0,
     errors: addResult.errors.length + mergeResult.errors.length
+  };
+}
+
+/**
+ * Shared workflow implementation for pushing selected master fields to every
+ * captain sheet in a folder.
+ *
+ * @param {SpreadsheetApp.Spreadsheet} configSs
+ * @param {Object} config
+ * @param {boolean} dryRun
+ * @param {string} logTab
+ * @return {Object}
+ */
+function executePushToFolderWorkflow_(configSs, config, dryRun, logTab) {
+  var masterSs     = SpreadsheetApp.openById(config.masterId);
+  var masterSheet  = masterSs.getSheets()[0];
+  var masterData   = masterSheet.getDataRange().getValues();
+  if (masterData.length === 0) throw new Error('Master spreadsheet is empty.');
+  var masterHdrs   = masterData[0].map(function (h) { return String(h).trim(); });
+  var sourceLookup = buildSourceLookup_(masterData, masterHdrs, config.matchColumn);
+  var targetCols   = config.columnMap.map(function (m) { return m.target; });
+
+  var folder = DriveApp.getFolderById(config.folderId);
+  var iter   = folder.getFilesByType(MimeType.GOOGLE_SHEETS);
+  var files  = [];
+  while (iter.hasNext()) files.push(iter.next());
+  files.sort(function (a, b) { return a.getName().localeCompare(b.getName()); });
+
+  var old = configSs.getSheetByName(logTab);
+  if (old) configSs.deleteSheet(old);
+
+  var totals = {
+    sheetsProcessed: files.length,
+    columnsAdded: 0,
+    cellsFilled: 0,
+    cellsOverwritten: 0,
+    conflicts: 0,
+    skipped: 0,
+    errors: 0
+  };
+
+  for (var i = 0; i < files.length; i++) {
+    var file = files[i];
+    var fileName = file.getName();
+    try {
+      var ss = SpreadsheetApp.openById(file.getId());
+      var sheet = ss.getSheets()[0];
+
+      var addResult = addColumnsToTarget_(sheet, targetCols, dryRun);
+      var virtualCols = addResult.added.map(function (a) { return a.column; });
+      var mergeResult = mergeIntoTargetWithPolicies_(
+        sheet,
+        sourceLookup,
+        config.matchColumn,
+        config.columnMap,
+        config.importColumnPolicies,
+        dryRun,
+        virtualCols
+      );
+
+      appendToSyncLog_(configSs, logTab, fileName, addResult, mergeResult);
+      totals.columnsAdded     += addResult.added.length;
+      totals.cellsFilled      += mergeResult.filled.length;
+      totals.cellsOverwritten += mergeResult.overwritten.length;
+      totals.conflicts        += mergeResult.conflicts.length;
+      totals.skipped          += mergeResult.skipped.length;
+      totals.errors           += addResult.errors.length + mergeResult.errors.length;
+    } catch (e) {
+      appendToSyncLog_(configSs, logTab, fileName,
+        { added: [], skipped: [], errors: [] },
+        { filled: [], overwritten: [], conflicts: [], skipped: [], errors: [{ row: 0, column: '', existingValue: '', newValue: e.message }] }
+      );
+      totals.errors++;
+    }
+  }
+
+  return {
+    sourceSpreadsheet: masterSs.getName(),
+    sourceTab: masterSheet.getName(),
+    targetSpreadsheet: 'User Sheets Folder',
+    logTab: logTab,
+    sheetsProcessed: totals.sheetsProcessed,
+    columnsAdded: totals.columnsAdded,
+    cellsFilled: totals.cellsFilled,
+    cellsOverwritten: totals.cellsOverwritten,
+    conflicts: totals.conflicts,
+    skipped: totals.skipped,
+    errors: totals.errors
   };
 }
 
@@ -1177,7 +1385,9 @@ function setupWorkflowPresetsTab_(ss) {
     'Master Spreadsheet',
     'Match Column',
     'Column Mappings',
-    'Notes'
+    'Notes',
+    'Column Policies',
+    'User Sheets Folder'
   ];
 
   var existingData = tab.getDataRange().getValues();
@@ -1196,29 +1406,75 @@ function setupWorkflowPresetsTab_(ss) {
     'Source Header | Target Header\n\n' +
     'If source and target use the same header, write it on both sides.'
   );
+  tab.getRange(1, 11).setNote(
+    'One policy per line. Use:\n\n' +
+    'Column Header -> policy\n\n' +
+    'Supported policies:\n' +
+    'fill_blank: write only when target is blank\n' +
+    'overwrite: replace differing non-blank target values\n' +
+    'conflict: log differences without writing\n' +
+    'never: skip the column\n\n' +
+    'Dry Run shows proposed overwrites before a live run writes them.'
+  );
 
   if (!hasExistingRows) {
     var settings = readMergeConfig_(ss);
-    var defaultMappings = [
+    var salesMappings = [
       'Address - Sold Since Fire -> Address - Sold Since Fire',
       'Sales History -> Sales History',
       'Latest Sale Date -> Latest Sale Date',
       'Latest Sale Price -> Latest Sale Price',
       'Latest New Owner -> Latest New Owner'
     ].join('\n');
+    var salesPolicies = [
+      'Address - Sold Since Fire -> overwrite',
+      'Sales History -> overwrite',
+      'Latest Sale Date -> overwrite',
+      'Latest Sale Price -> overwrite',
+      'Latest New Owner -> overwrite'
+    ].join('\n');
+    var dashboardMappings = [
+      'Address - Sold Since Fire -> Address - Sold Since Fire',
+      'Sales History -> Sales History'
+    ].join('\n');
+    var dashboardPolicies = [
+      'Address - Sold Since Fire -> overwrite',
+      'Sales History -> overwrite'
+    ].join('\n');
 
-    tab.getRange(2, 1, 1, headers.length).setValues([[
-      'sales-import',
-      'Update Master From Sales Tracker',
-      'import_to_master',
-      'Yes',
-      settings.sourceId || '',
-      settings.sourceTabName || 'Sales Rollup by APN',
-      settings.masterId || '',
-      settings.matchColumn || 'APN',
-      defaultMappings,
-      'Imports the one-row-per-APN sales rollup into the master. Start with Dry Run.'
-    ]]);
+    tab.getRange(2, 1, 2, headers.length).setValues([
+      [
+        'sales-import',
+        'Update Master From Sales Tracker',
+        'import_to_master',
+        'Yes',
+        settings.sourceId || '',
+        settings.sourceTabName || 'Sales Rollup by APN',
+        settings.masterId || '',
+        settings.matchColumn || 'APN',
+        salesMappings,
+        'Imports the one-row-per-APN sales rollup into the master. Start with Dry Run.',
+        salesPolicies,
+        ''
+      ],
+      [
+        'push-dashboard-fields',
+        'Push Dashboard Fields to Captain Sheets',
+        'push_to_folder',
+        'Yes',
+        '',
+        '',
+        settings.masterId || '',
+        settings.matchColumn || 'APN',
+        dashboardMappings,
+        'Pushes dashboard-facing fields from master to every captain sheet in the folder. Start with Dry Run.',
+        dashboardPolicies,
+        settings.folderId || ''
+      ]
+    ]);
+  } else {
+    seedDefaultSalesImportPolicies_(tab);
+    seedDefaultDashboardPushWorkflow_(tab, ss);
   }
 
   tab.setColumnWidth(1, 150);
@@ -1231,5 +1487,87 @@ function setupWorkflowPresetsTab_(ss) {
   tab.setColumnWidth(8, 130);
   tab.setColumnWidth(9, 360);
   tab.setColumnWidth(10, 360);
-  tab.getRange(2, 9, Math.max(tab.getMaxRows() - 1, 1), 2).setWrap(true);
+  tab.setColumnWidth(11, 320);
+  tab.setColumnWidth(12, 280);
+  tab.getRange(2, 9, Math.max(tab.getMaxRows() - 1, 1), 4).setWrap(true);
+}
+
+/**
+ * Adds default overwrite policies to an existing sales-import preset when the
+ * new Column Policies column is blank.
+ *
+ * @param {SpreadsheetApp.Sheet} tab
+ */
+function seedDefaultSalesImportPolicies_(tab) {
+  var data = tab.getDataRange().getValues();
+  if (data.length < 2) return;
+
+  var headers = data[0].map(function (h) { return String(h).trim(); });
+  var idCol = headers.indexOf('Workflow ID');
+  var nameCol = headers.indexOf('Workflow Name');
+  var policyCol = headers.indexOf('Column Policies');
+  if (policyCol === -1) return;
+
+  var defaultPolicies = [
+    'Address - Sold Since Fire -> overwrite',
+    'Sales History -> overwrite',
+    'Latest Sale Date -> overwrite',
+    'Latest Sale Price -> overwrite',
+    'Latest New Owner -> overwrite'
+  ].join('\n');
+
+  for (var r = 1; r < data.length; r++) {
+    var id = idCol === -1 ? '' : String(data[r][idCol] || '').trim();
+    var name = nameCol === -1 ? '' : String(data[r][nameCol] || '').trim();
+    var policies = String(data[r][policyCol] || '').trim();
+    if (policies === '' && (id === 'sales-import' || name === 'Update Master From Sales Tracker')) {
+      tab.getRange(r + 1, policyCol + 1).setValue(defaultPolicies);
+    }
+  }
+}
+
+/**
+ * Adds the dashboard push workflow to existing preset tabs if it is missing.
+ *
+ * @param {SpreadsheetApp.Sheet} tab
+ * @param {SpreadsheetApp.Spreadsheet} ss
+ */
+function seedDefaultDashboardPushWorkflow_(tab, ss) {
+  var data = tab.getDataRange().getValues();
+  var headers = data[0].map(function (h) { return String(h).trim(); });
+  var idCol = headers.indexOf('Workflow ID');
+  if (idCol === -1) return;
+
+  for (var r = 1; r < data.length; r++) {
+    if (String(data[r][idCol] || '').trim() === 'push-dashboard-fields') return;
+  }
+
+  var settings = readMergeConfig_(ss);
+  var dashboardMappings = [
+    'Address - Sold Since Fire -> Address - Sold Since Fire',
+    'Sales History -> Sales History'
+  ].join('\n');
+  var dashboardPolicies = [
+    'Address - Sold Since Fire -> overwrite',
+    'Sales History -> overwrite'
+  ].join('\n');
+
+  var rowByHeader = {
+    'Workflow ID': 'push-dashboard-fields',
+    'Workflow Name': 'Push Dashboard Fields to Captain Sheets',
+    'Operation': 'push_to_folder',
+    'Enabled': 'Yes',
+    'Master Spreadsheet': settings.masterId || '',
+    'Match Column': settings.matchColumn || 'APN',
+    'Column Mappings': dashboardMappings,
+    'Notes': 'Pushes dashboard-facing fields from master to every captain sheet in the folder. Start with Dry Run.',
+    'Column Policies': dashboardPolicies,
+    'User Sheets Folder': settings.folderId || ''
+  };
+
+  var row = [];
+  for (var c = 0; c < headers.length; c++) {
+    row.push(rowByHeader[headers[c]] || '');
+  }
+  tab.getRange(tab.getLastRow() + 1, 1, 1, headers.length).setValues([row]);
 }

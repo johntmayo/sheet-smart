@@ -59,7 +59,7 @@ Operations for managing data and schema across your master spreadsheet and user 
 | **External Source** | Any other spreadsheet you want to import data FROM into the master (e.g. a sales feed, a contractor's file). |
 | **Source Tab Name** | Optional tab inside the external source spreadsheet. If blank, imports use the first tab. |
 | **Match Column** | The column that exists in both master and user sheets to match rows — usually APN. |
-| **Workflow Preset** | A named, task-oriented configuration used by the guided sidebar (for example, "Update Master From Sales Tracker"). |
+| **Workflow Preset** | A named, task-oriented configuration used by the guided sidebar (for example, "Update Master From Sales Tracker"). Presets can include per-column import policies. |
 
 ### The operations
 
@@ -133,7 +133,16 @@ Operations for managing data and schema across your master spreadsheet and user 
 
    Unlisted columns default to `conflict`, and `resident_id` is always protected as `never`.
 
-8. For guided workflows, review the Workflow Presets tab and then click **Sheet Smart → Open Dashboard**. The first supported sidebar workflow is **Update Master From Sales Tracker**, which runs an Import → Master using the preset's source spreadsheet, source tab, match column, and mappings. Start with **Dry Run** and review the log before running live.
+8. For guided workflows, review the Workflow Presets tab and then click **Sheet Smart → Open Dashboard**. The first supported sidebar workflows are **Update Master From Sales Tracker** and **Push Dashboard Fields to Captain Sheets**. Start with **Dry Run** and review fills/overwrites/conflicts before running live.
+
+   Workflow `Column Policies` use one line per target/source column:
+
+   ```text
+   Sales History -> overwrite
+   Latest Sale Date -> overwrite
+   ```
+
+   Supported policies are `fill_blank`, `overwrite`, `conflict`, and `never`. Unlisted workflow columns default to `fill_blank`.
 
 > **Note:** Phase 2 does not require the Drive Advanced Service. Only Phase 1 needs it.
 
@@ -146,6 +155,7 @@ Operations for managing data and schema across your master spreadsheet and user 
 - **Push Missing Rows** appends whole new rows at the bottom of the target, populated by header-name join from master (every target column with a matching master header is filled). Existing rows are never modified; rows are never removed. Running it multiple times is safe — residents already in the sheet are skipped.
 - **Pull Missing Rows** appends whole new rows at the bottom of the master, populated by header-name join from each user sheet. User-sheet columns missing from master are added to master first. Existing master rows are never modified; rows are never removed. Running it multiple times is safe — residents already in master are skipped.
 - **Pull Data** updates existing master rows according to `Pull Column Policy`, then appends rows whose `resident_id` is not already in master. Source blank cells never overwrite master values.
+- **Sidebar workflow imports** can also use per-column policies. In dry run, `overwrite` rows are listed as proposed overwrites; in live mode they are written.
 
 ### Where results go
 
@@ -161,6 +171,8 @@ All logs land on tabs in the **Sheet Smart Config** spreadsheet. Each live run c
 | Pull Missing Rows ← User Sheet / Folder | `Last Pull - Missing Rows` | `Dry Run - Pull Missing Rows` |
 | Pull Data ← User Sheet / Folder | `Last Pull Data` | `Dry Run - Pull Data` |
 | Rename Columns → User Sheets Folder | `Last Rename - Folder` | `Dry Run - Rename Folder` |
+| Sidebar workflow: Update Master From Sales Tracker | `Last Run - Update Master From Sales Tracker` | `Dry Run - Update Master From Sales Tracker` |
+| Sidebar workflow: Push Dashboard Fields to Captain Sheets | `Last Run - Push Dashboard Fields to Captain Sheets` | `Dry Run - Push Dashboard Fields to Captain Sheets` |
 
 The **Flagged - Sensitive Data** tab only appears when at least one appended row had a non-blank value in one or more `Sensitive Columns`. Each row lists the destination spreadsheet, the resident_id and name, and which sensitive columns were populated — so you can go to the captain whose zone the resident came from and confirm that sharing those notes with the new captain is okay.
 
@@ -171,8 +183,8 @@ The **Flagged - Sensitive Data** tab only appears when at least one appended row
 | Column Added | A missing column header was appended to the target sheet's row 1; for Pull Missing Rows, this means a source-only header was added to master. |
 | Filled | A blank cell was filled with the source value. |
 | Conflict | The target cell already had a different value. Not overwritten — review manually. |
+| Overwritten | A workflow import or Pull Data operation replaced an existing value because the column policy was `overwrite`. |
 | Appended | A whole new row was added at the bottom of the target (Push Missing Rows or Pull Missing Rows only). |
-| Overwritten | Pull Data replaced an existing master value because the column policy was `overwrite`. |
 | Renamed | The target header in row 1 was changed from the old name to the new name. |
 | Skipped | A row or schema change was intentionally skipped (e.g. duplicate `resident_id`, blank `resident_id`, old header missing, or new header already exists). |
 | Error | Something prevented the row or sheet from being processed. |

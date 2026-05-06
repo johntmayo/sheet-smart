@@ -151,6 +151,13 @@
         padding-left: 9px;
       }
 
+      .policy {
+        color: var(--muted);
+        display: block;
+        font-size: 12px;
+        margin-top: 2px;
+      }
+
       .check {
         border: 1px solid var(--line);
         padding: 9px;
@@ -209,6 +216,20 @@
         padding-top: 10px;
       }
 
+      .global-status {
+        background: var(--accent-soft);
+        border: 1px solid #b7d3df;
+        color: var(--accent);
+        margin-bottom: 14px;
+        padding: 10px 12px;
+      }
+
+      .global-status.error {
+        background: var(--error-soft);
+        border-color: #efb3b6;
+        color: var(--error);
+      }
+
       .result-grid {
         grid-template-columns: 1fr 1fr;
       }
@@ -239,6 +260,7 @@
 
       <section>
         <h2>Workflows</h2>
+        <div id="globalStatus" class="global-status hidden"></div>
         <div id="workflowList" class="workflow-list">
           <p class="muted">Loading workflows...</p>
         </div>
@@ -249,7 +271,7 @@
           <h2 id="workflowName"></h2>
           <div class="kv">
             <div class="kv-row">
-              <div class="label">Source Tab</div>
+              <div class="label">Source</div>
               <div id="sourceTab"></div>
             </div>
             <div class="kv-row">
@@ -286,8 +308,10 @@
           <h3 id="resultTitle">Last Result</h3>
           <div class="result-grid">
             <div class="result-stat"><strong id="columnsAdded">0</strong><span>Columns added</span></div>
-            <div class="result-stat"><strong id="cellsFilled">0</strong><span>Cells filled</span></div>
+            <div class="result-stat"><strong id="cellsFilled">0</strong><span>Filled</span></div>
+            <div class="result-stat"><strong id="cellsOverwritten">0</strong><span>Overwritten</span></div>
             <div class="result-stat"><strong id="conflicts">0</strong><span>Conflicts</span></div>
+            <div class="result-stat"><strong id="skipped">0</strong><span>Skipped</span></div>
             <div class="result-stat"><strong id="errors">0</strong><span>Errors</span></div>
           </div>
           <p id="resultLog" class="muted" style="margin-top: 10px;"></p>
@@ -303,6 +327,17 @@
 
       function setStatus(message) {
         document.getElementById('status').textContent = message || '';
+      }
+
+      function setGlobalStatus(message, isError) {
+        var el = document.getElementById('globalStatus');
+        if (!message) {
+          el.className = 'global-status hidden';
+          el.textContent = '';
+          return;
+        }
+        el.className = 'global-status' + (isError ? ' error' : '');
+        el.textContent = message;
       }
 
       function setBusy(isBusy) {
@@ -322,6 +357,7 @@
         model.workflows.forEach(function (workflow) {
           var button = document.createElement('button');
           button.type = 'button';
+          button.setAttribute('data-workflow-id', workflow.id);
           button.className = 'workflow-card' + (workflow.id === state.selectedWorkflowId ? ' active' : '');
           button.innerHTML =
             '<span class="workflow-title">' + escapeHtml(workflow.name) + '</span>' +
@@ -329,19 +365,16 @@
           button.onclick = function () { loadWorkflow(workflow.id); };
           list.appendChild(button);
         });
-
-        if (!state.selectedWorkflowId) {
-          loadWorkflow(model.workflows[0].id);
-        }
       }
 
       function renderDetails(workflow) {
         state.selectedWorkflowId = workflow.id;
         state.ready = !!workflow.ready;
 
+        setGlobalStatus('', false);
         document.getElementById('details').classList.remove('hidden');
         document.getElementById('workflowName').textContent = workflow.name;
-        document.getElementById('sourceTab').textContent = workflow.sourceTabName || '(first tab)';
+        document.getElementById('sourceTab').textContent = workflow.sourceLabel || workflow.sourceTabName || '(first tab)';
         document.getElementById('matchColumn').textContent = workflow.matchColumn || '(not set)';
         document.getElementById('workflowNotes').textContent = workflow.notes || '';
 
@@ -350,7 +383,9 @@
         workflow.mappings.forEach(function (mapping) {
           var item = document.createElement('div');
           item.className = 'mapping';
-          item.textContent = mapping.source + ' -> ' + mapping.target;
+          item.innerHTML =
+            escapeHtml(mapping.source) + ' -> ' + escapeHtml(mapping.target) +
+            '<span class="policy">Policy: ' + escapeHtml(mapping.policy || 'fill_blank') + '</span>';
           mappingList.appendChild(item);
         });
 
@@ -367,6 +402,7 @@
         setStatus(workflow.ready ? 'Ready. Start with Dry Run.' : 'Fix errors before running live.');
         setBusy(false);
         refreshWorkflowCards();
+        document.getElementById('details').scrollIntoView({ behavior: 'smooth', block: 'start' });
       }
 
       function renderResult(result) {
@@ -374,10 +410,13 @@
         document.getElementById('resultTitle').textContent = result.mode + ' Complete';
         document.getElementById('columnsAdded').textContent = result.columnsAdded;
         document.getElementById('cellsFilled').textContent = result.cellsFilled;
+        document.getElementById('cellsOverwritten').textContent = result.cellsOverwritten || 0;
         document.getElementById('conflicts').textContent = result.conflicts;
+        document.getElementById('skipped').textContent = result.skipped || 0;
         document.getElementById('errors').textContent = result.errors;
+        var processed = result.sheetsProcessed ? result.sheetsProcessed + ' sheet(s) processed. ' : '';
         document.getElementById('resultLog').textContent =
-          'Source tab "' + result.sourceTab + '" wrote details to "' + result.logTab + '".';
+          processed + 'Details were written to "' + result.logTab + '".';
       }
 
       function loadDashboard() {
@@ -393,15 +432,40 @@
             var selected = state.selectedWorkflowId;
             renderWorkflowList(model);
             state.selectedWorkflowId = selected;
+            markSelectedWorkflow();
           })
           .withFailureHandler(showError)
           .getSheetSmartDashboardModel();
       }
 
+      function markSelectedWorkflow() {
+        var cards = document.querySelectorAll('.workflow-card');
+        for (var i = 0; i < cards.length; i++) {
+          cards[i].classList.remove('active');
+        }
+        if (!state.selectedWorkflowId) return;
+        for (var j = 0; j < cards.length; j++) {
+          if (cards[j].getAttribute('data-workflow-id') === state.selectedWorkflowId) {
+            cards[j].classList.add('active');
+          }
+        }
+      }
+
       function loadWorkflow(workflowId) {
         state.selectedWorkflowId = workflowId;
+        state.ready = false;
+        setGlobalStatus('Opening workflow...', false);
+        document.getElementById('details').classList.remove('hidden');
+        document.getElementById('workflowName').textContent = 'Loading workflow...';
+        document.getElementById('sourceTab').textContent = '';
+        document.getElementById('matchColumn').textContent = '';
+        document.getElementById('workflowNotes').textContent = '';
+        document.getElementById('mappingList').innerHTML = '<p class="muted">Loading mappings...</p>';
+        document.getElementById('checkList').innerHTML = '<div class="check">Checking spreadsheet access and headers...</div>';
         document.getElementById('resultPanel').classList.add('hidden');
         setStatus('Checking workflow...');
+        setBusy(true);
+        document.getElementById('details').scrollIntoView({ behavior: 'smooth', block: 'start' });
         google.script.run
           .withSuccessHandler(renderDetails)
           .withFailureHandler(showError)
@@ -428,7 +492,10 @@
 
       function showError(error) {
         setBusy(false);
-        setStatus(error && error.message ? error.message : String(error));
+        var message = error && error.message ? error.message : String(error);
+        setGlobalStatus(message, true);
+        document.getElementById('details').classList.remove('hidden');
+        setStatus(message);
       }
 
       function escapeHtml(value) {
