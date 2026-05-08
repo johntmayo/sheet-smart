@@ -42,8 +42,12 @@
 **Supported dashboard workflows:**
 - **Update Master From Sales Tracker** — imports the formula-generated `Sales Rollup by APN` tab into the master by `APN`. Default mapped fields: `Address - Sold Since Fire`, `Sales History`, `Latest Sale Date`, `Latest Sale Price`, `Latest New Owner`. Default policy: `overwrite` for these sales-owned fields. Dry run shows proposed overwrites before live run writes them.
 - **Push Dashboard Fields to Captain Sheets** — pushes dashboard-facing fields from the master to every spreadsheet in `User Sheets Folder` by `APN`. Default mapped fields: `Address - Sold Since Fire`, `Sales History`. Default policy: `overwrite`, because master is authoritative for these dashboard fields.
+- **Push Missing Residents to Captain Sheets** — wraps Push Missing Rows → User Sheets Folder. It appends only master residents matching each sheet's detected `ZoneName`, shows detected zones, rows appended, sensitive-data flags, skipped rows, and errors, and never modifies existing rows.
+- **Pull Captain Data Into Master** — wraps Pull Data ← User Sheets Folder. It reads `Pull Column Policy`, shows policy effects in the sidebar, and summarizes filled cells, overwrites, conflicts, appended rows, skipped rows, and errors.
+- **Pull Missing Captain Rows Into Master** — wraps Pull Missing Rows ← User Sheets Folder. It appends captain-created rows missing from master, adds source-only headers first, and summarizes appended rows, columns added, blank/duplicate `resident_id` skips, and errors.
+- **Rename Column Across Captain Sheets** — wraps Rename Columns → User Sheets Folder with explicit dry-run language before a live row-1 header change across the folder.
 
-**Core operating loop now supported in the sidebar:**
+**Core sales operating loop now supported in the sidebar:**
 1. Update Master From Sales Tracker
 2. Push Dashboard Fields to Captain Sheets
 
@@ -80,10 +84,8 @@ This is the main sales-data publishing loop: raw sales events roll up by APN, th
 - `Sales History` carries historical sale details. `Latest Sale Date`, `Latest Sale Price`, and `Latest New Owner` are latest-sale snapshot fields.
 
 **Next implementation priorities:**
-1. **Push Missing Residents to Captain Sheets** — add a sidebar workflow for the existing Push Missing Rows → Folder behavior. It should show detected zones, rows appended, sensitive-data flags, skipped rows, and errors. This workflow appends rows only; it must never modify existing rows.
-2. **Pull Captain Data Into Master** — add a sidebar workflow for Pull Data ← Folder. It should expose/read `Pull Column Policy`, make the policy effects easy to understand, and summarize filled, overwritten, conflicts, appended, skipped, and errors.
-3. **Pull Missing Captain Rows Into Master** — add a sidebar workflow for Pull Missing Rows ← Folder. It should summarize rows appended to master, source-only columns added, duplicate/blank `resident_id` skips, and errors.
-4. **Rename Column Across Captain Sheets** — add a sidebar workflow for Rename Columns → User Sheets Folder with very explicit dry-run language because it touches every sheet header.
+1. Group sidebar workflow cards by operating loop (Sales, Captain Push, Captain Pull, Admin Tools) once the UI needs more scanability.
+2. Consider requiring an explicit acknowledgement before live rename runs, since that workflow changes headers across every captain sheet.
 
 **Open questions / later polish:**
 - Should column order in targets match the master after columns are added?

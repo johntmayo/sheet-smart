@@ -164,14 +164,24 @@ function runWorkflowFromSidebar_(workflowId, dryRun) {
   if (!preset) throw new Error('Workflow "' + workflowId + '" was not found.');
   if (!preset.enabled) throw new Error('Workflow "' + preset.name + '" is disabled.');
 
+  var settings = readMergeConfig_(configSs);
+  var workflow = buildEffectiveWorkflowConfig_(preset, settings);
   var logTab = dryRun ? 'Dry Run - ' + preset.name : 'Last Run - ' + preset.name;
   var result;
-  if (preset.operation === 'import_to_master') {
-    result = executeImportToMaster_(configSs, preset, dryRun, logTab);
-  } else if (preset.operation === 'push_to_folder') {
-    result = executePushToFolderWorkflow_(configSs, preset, dryRun, logTab);
+  if (workflow.operation === 'import_to_master') {
+    result = executeImportToMaster_(configSs, workflow, dryRun, logTab);
+  } else if (workflow.operation === 'push_to_folder') {
+    result = executePushToFolderWorkflow_(configSs, workflow, dryRun, logTab);
+  } else if (workflow.operation === 'push_missing_rows_to_folder') {
+    result = executePushMissingRowsToFolderWorkflow_(configSs, workflow, dryRun, logTab, dryRun ? 'Dry Run - Flagged Sensitive Data' : 'Flagged - Sensitive Data');
+  } else if (workflow.operation === 'pull_data_from_folder') {
+    result = executePullDataFromFolderWorkflow_(configSs, workflow, dryRun, logTab);
+  } else if (workflow.operation === 'pull_missing_rows_from_folder') {
+    result = executePullMissingRowsFromFolderWorkflow_(configSs, workflow, dryRun, logTab);
+  } else if (workflow.operation === 'rename_columns_in_folder') {
+    result = executeRenameColumnsInFolderWorkflow_(configSs, workflow, dryRun, logTab);
   } else {
-    throw new Error('Workflow operation "' + preset.operation + '" is not supported by the sidebar yet.');
+    throw new Error('Workflow operation "' + workflow.operation + '" is not supported by the sidebar yet.');
   }
   result.workflowId = preset.id;
   result.workflowName = preset.name;
@@ -189,23 +199,20 @@ function runWorkflowFromSidebar_(workflowId, dryRun) {
  * @return {Object}
  */
 function buildWorkflowSidebarModel_(configSs, preset, includeChecks) {
-  var checks = includeChecks ? validateWorkflow_(preset) : [];
+  var settings = readMergeConfig_(configSs);
+  var workflow = buildEffectiveWorkflowConfig_(preset, settings);
+  var checks = includeChecks ? validateWorkflow_(workflow) : [];
+  var mappings = getWorkflowSidebarMappings_(workflow);
   return {
     id: preset.id,
     name: preset.name,
-    operation: preset.operation,
-    sourceTabName: preset.sourceTabName,
-    sourceLabel: getWorkflowSourceLabel_(preset),
-    matchColumn: preset.matchColumn,
-    mappingCount: preset.columnMap.length,
-    mappings: preset.columnMap.map(function (mapping) {
-      return {
-        source: mapping.source,
-        target: mapping.target,
-        policy: preset.importColumnPolicies[mapping.target] || preset.importColumnPolicies[mapping.source] || 'fill_blank'
-      };
-    }),
-    notes: preset.notes,
+    operation: workflow.operation,
+    sourceTabName: workflow.sourceTabName,
+    sourceLabel: getWorkflowSourceLabel_(workflow),
+    matchColumn: getWorkflowMatchLabel_(workflow),
+    mappingCount: (workflow.operation === 'import_to_master' || workflow.operation === 'push_to_folder') ? mappings.length : 0,
+    mappings: mappings,
+    notes: getWorkflowNotes_(workflow),
     checks: checks,
     ready: checks.length === 0 || checks.every(function (check) { return check.status !== 'error'; })
   };
@@ -214,24 +221,148 @@ function buildWorkflowSidebarModel_(configSs, preset, includeChecks) {
 /**
  * Routes workflow validation to the operation-specific checker.
  *
- * @param {Object} preset
+ * @param {Object} workflow
  * @return {Array<{status: string, message: string}>}
  */
-function validateWorkflow_(preset) {
-  if (preset.operation === 'import_to_master') return validateImportWorkflow_(preset);
-  if (preset.operation === 'push_to_folder') return validatePushToFolderWorkflow_(preset);
-  return [{ status: 'error', message: 'Unsupported workflow operation: ' + preset.operation }];
+function validateWorkflow_(workflow) {
+  if (workflow.operation === 'import_to_master') return validateImportWorkflow_(workflow);
+  if (workflow.operation === 'push_to_folder') return validatePushToFolderWorkflow_(workflow);
+  if (workflow.operation === 'push_missing_rows_to_folder') return validatePushMissingRowsToFolderWorkflow_(workflow);
+  if (workflow.operation === 'pull_data_from_folder') return validatePullDataFromFolderWorkflow_(workflow);
+  if (workflow.operation === 'pull_missing_rows_from_folder') return validatePullMissingRowsFromFolderWorkflow_(workflow);
+  if (workflow.operation === 'rename_columns_in_folder') return validateRenameColumnsInFolderWorkflow_(workflow);
+  return [{ status: 'error', message: 'Unsupported workflow operation: ' + workflow.operation }];
+}
+
+/**
+ * Combines workflow preset values with Settings tab fallbacks used by
+ * folder-wide sidebar wrappers.
+ *
+ * @param {Object} preset
+ * @param {Object} settings
+ * @return {Object}
+ */
+function buildEffectiveWorkflowConfig_(preset, settings) {
+  settings = settings || {};
+  return {
+    id: preset.id,
+    name: preset.name,
+    operation: preset.operation,
+    enabled: preset.enabled,
+    sourceId: preset.sourceId || settings.sourceId || '',
+    sourceTabName: preset.sourceTabName || settings.sourceTabName || '',
+    masterId: preset.masterId || settings.masterId || '',
+    folderId: preset.folderId || settings.folderId || '',
+    matchColumn: preset.matchColumn || settings.matchColumn || '',
+    renameFrom: settings.renameFrom || '',
+    renameTo: settings.renameTo || '',
+    columnMap: preset.columnMap || [],
+    importColumnPolicies: preset.importColumnPolicies || {},
+    sensitiveColumns: settings.sensitiveColumns || [],
+    pullColumnPolicies: settings.pullColumnPolicies || {},
+    notes: preset.notes || ''
+  };
 }
 
 /**
  * Returns a short source label for the sidebar details panel.
  *
- * @param {Object} preset
+ * @param {Object} workflow
  * @return {string}
  */
-function getWorkflowSourceLabel_(preset) {
-  if (preset.operation === 'push_to_folder') return 'Master spreadsheet';
-  return preset.sourceTabName || '(first tab)';
+function getWorkflowSourceLabel_(workflow) {
+  if (workflow.operation === 'push_to_folder' || workflow.operation === 'push_missing_rows_to_folder') {
+    return 'Master spreadsheet -> captain sheets folder';
+  }
+  if (workflow.operation === 'pull_data_from_folder' || workflow.operation === 'pull_missing_rows_from_folder') {
+    return 'Captain sheets folder -> master spreadsheet';
+  }
+  if (workflow.operation === 'rename_columns_in_folder') {
+    return 'Captain sheets folder headers';
+  }
+  return workflow.sourceTabName || '(first tab)';
+}
+
+/**
+ * Returns the match/identity label shown in the sidebar.
+ *
+ * @param {Object} workflow
+ * @return {string}
+ */
+function getWorkflowMatchLabel_(workflow) {
+  if (workflow.operation === 'push_missing_rows_to_folder' || workflow.operation === 'pull_data_from_folder' || workflow.operation === 'pull_missing_rows_from_folder') {
+    return 'resident_id';
+  }
+  if (workflow.operation === 'rename_columns_in_folder') {
+    return workflow.renameFrom && workflow.renameTo ? workflow.renameFrom + ' -> ' + workflow.renameTo : '(set Rename Column fields)';
+  }
+  return workflow.matchColumn;
+}
+
+/**
+ * Returns sidebar rows for mappings/policies or operation-specific behavior.
+ *
+ * @param {Object} workflow
+ * @return {Array<{source: string, target: string, policy: string}>}
+ */
+function getWorkflowSidebarMappings_(workflow) {
+  if (workflow.operation === 'pull_data_from_folder') {
+    return getPullPolicySummaryRows_(workflow.pullColumnPolicies);
+  }
+  if (workflow.operation === 'push_missing_rows_to_folder') {
+    return [{ source: 'Master rows by ZoneName', target: 'Captain sheet rows', policy: 'append only; never edits existing rows' }];
+  }
+  if (workflow.operation === 'pull_missing_rows_from_folder') {
+    return [{ source: 'Captain rows missing from master', target: 'Master rows', policy: 'append only; source-only headers are added first' }];
+  }
+  if (workflow.operation === 'rename_columns_in_folder') {
+    return [{ source: workflow.renameFrom || '(Rename Column - From)', target: workflow.renameTo || '(Rename Column - To)', policy: 'header row only; dry run strongly recommended' }];
+  }
+  return workflow.columnMap.map(function (mapping) {
+    return {
+      source: mapping.source,
+      target: mapping.target,
+      policy: workflow.importColumnPolicies[mapping.target] || workflow.importColumnPolicies[mapping.source] || 'fill_blank'
+    };
+  });
+}
+
+/**
+ * @param {Object} policies
+ * @return {Array<{source: string, target: string, policy: string}>}
+ */
+function getPullPolicySummaryRows_(policies) {
+  var rows = [];
+  var keys = Object.keys(policies || {}).sort();
+  for (var i = 0; i < keys.length; i++) {
+    rows.push({ source: keys[i], target: 'Master', policy: policies[keys[i]] });
+  }
+  rows.push({ source: 'Unlisted captain columns', target: 'Master', policy: 'conflict by default' });
+  return rows;
+}
+
+/**
+ * @param {Object} workflow
+ * @return {string}
+ */
+function getWorkflowNotes_(workflow) {
+  if (workflow.operation === 'rename_columns_in_folder') {
+    return (workflow.notes ? workflow.notes + ' ' : '') +
+      'Dry Run only previews header changes. Live Run changes row 1 across every captain sheet in the folder.';
+  }
+  if (workflow.operation === 'push_missing_rows_to_folder') {
+    return (workflow.notes ? workflow.notes + ' ' : '') +
+      'This workflow only appends new resident rows; existing captain rows are not modified or removed.';
+  }
+  if (workflow.operation === 'pull_missing_rows_from_folder') {
+    return (workflow.notes ? workflow.notes + ' ' : '') +
+      'This workflow only appends new master rows and adds source-only headers; existing master rows are not modified.';
+  }
+  if (workflow.operation === 'pull_data_from_folder') {
+    return (workflow.notes ? workflow.notes + ' ' : '') +
+      'Existing master values follow Pull Column Policy. Unlisted columns log conflicts; resident_id is never changed.';
+  }
+  return workflow.notes;
 }
 
 /**
@@ -370,6 +501,209 @@ function validatePushToFolderWorkflow_(preset) {
   }
 
   return checks;
+}
+
+/**
+ * Validates the sidebar append-missing-residents folder workflow.
+ *
+ * @param {Object} workflow
+ * @return {Array<{status: string, message: string}>}
+ */
+function validatePushMissingRowsToFolderWorkflow_(workflow) {
+  var checks = [];
+  if (!workflow.masterId) checks.push({ status: 'error', message: 'Master spreadsheet is not set.' });
+  if (!workflow.folderId) checks.push({ status: 'error', message: 'User sheets folder is not set.' });
+  if (checks.length > 0) return checks;
+
+  try {
+    var masterSs = SpreadsheetApp.openById(workflow.masterId);
+    var masterSheet = masterSs.getSheets()[0];
+    var masterData = masterSheet.getDataRange().getValues();
+    var masterHeaders = masterData.length > 0 ? masterData[0].map(function (h) { return String(h).trim(); }) : [];
+    var missingMaster = findMissingHeaders_(masterHeaders, ['resident_id', 'ZoneName']);
+    checks.push({ status: 'ok', message: 'Master found: ' + masterSs.getName() + ' (' + Math.max(masterData.length - 1, 0) + ' data rows).' });
+    if (missingMaster.length > 0) {
+      checks.push({ status: 'error', message: 'Master is missing: ' + missingMaster.join(', ') + '.' });
+    } else {
+      checks.push({ status: 'ok', message: 'Master has resident_id and ZoneName.' });
+    }
+
+    if (workflow.sensitiveColumns.length > 0) {
+      var missingSensitive = findMissingHeaders_(masterHeaders, workflow.sensitiveColumns);
+      if (missingSensitive.length > 0) {
+        checks.push({ status: 'warning', message: 'Configured sensitive columns not found in master and cannot be flagged: ' + missingSensitive.join(', ') + '.' });
+      } else {
+        checks.push({ status: 'ok', message: 'Sensitive columns are configured and present in master.' });
+      }
+    } else {
+      checks.push({ status: 'warning', message: 'No Sensitive Columns are configured; appended rows will not be privacy-flagged.' });
+    }
+  } catch (e) {
+    checks.push({ status: 'error', message: e.message });
+  }
+
+  var folderCheck = validateFolderSheets_(workflow.folderId, ['resident_id', 'ZoneName'], true);
+  return checks.concat(folderCheck);
+}
+
+/**
+ * Validates the sidebar Pull Data folder workflow.
+ *
+ * @param {Object} workflow
+ * @return {Array<{status: string, message: string}>}
+ */
+function validatePullDataFromFolderWorkflow_(workflow) {
+  var checks = validateMasterResidentId_(workflow.masterId);
+  checks = checks.concat(validateFolderSheets_(workflow.folderId, ['resident_id'], false));
+
+  var policies = workflow.pullColumnPolicies || {};
+  var policyKeys = Object.keys(policies).filter(function (key) { return key !== 'resident_id'; });
+  checks.push({
+    status: policyKeys.length > 0 ? 'ok' : 'warning',
+    message: 'Pull Column Policy has ' + policyKeys.length + ' editable column policy row(s). Unlisted columns default to conflict; resident_id is always never.'
+  });
+  return checks;
+}
+
+/**
+ * Validates the sidebar Pull Missing Rows folder workflow.
+ *
+ * @param {Object} workflow
+ * @return {Array<{status: string, message: string}>}
+ */
+function validatePullMissingRowsFromFolderWorkflow_(workflow) {
+  return validateMasterResidentId_(workflow.masterId)
+    .concat(validateFolderSheets_(workflow.folderId, ['resident_id'], false));
+}
+
+/**
+ * Validates the sidebar Rename Columns folder workflow.
+ *
+ * @param {Object} workflow
+ * @return {Array<{status: string, message: string}>}
+ */
+function validateRenameColumnsInFolderWorkflow_(workflow) {
+  var checks = [];
+  if (!workflow.folderId) checks.push({ status: 'error', message: 'User sheets folder is not set.' });
+  if (!workflow.renameFrom) checks.push({ status: 'error', message: 'Rename Column - From is not set in Settings.' });
+  if (!workflow.renameTo) checks.push({ status: 'error', message: 'Rename Column - To is not set in Settings.' });
+  if (workflow.renameFrom && workflow.renameTo && workflow.renameFrom === workflow.renameTo) {
+    checks.push({ status: 'error', message: 'Rename Column - From and Rename Column - To are identical.' });
+  }
+  if (checks.length > 0) return checks;
+
+  try {
+    var files = getGoogleSheetFilesInFolder_(workflow.folderId);
+    checks.push({ status: files.length > 0 ? 'ok' : 'warning', message: 'Folder found with ' + files.length + ' Google Sheets.' });
+    checks.push({ status: 'warning', message: 'Dry Run is the review step: live run changes row-1 headers across every sheet where the old header is found.' });
+  } catch (e) {
+    checks.push({ status: 'error', message: e.message });
+  }
+  return checks;
+}
+
+/**
+ * @param {string} masterId
+ * @return {Array<{status: string, message: string}>}
+ */
+function validateMasterResidentId_(masterId) {
+  var checks = [];
+  if (!masterId) return [{ status: 'error', message: 'Master spreadsheet is not set.' }];
+  try {
+    var masterSs = SpreadsheetApp.openById(masterId);
+    var masterData = masterSs.getSheets()[0].getDataRange().getValues();
+    var masterHeaders = masterData.length > 0 ? masterData[0].map(function (h) { return String(h).trim(); }) : [];
+    checks.push({ status: 'ok', message: 'Master found: ' + masterSs.getName() + ' (' + Math.max(masterData.length - 1, 0) + ' data rows).' });
+    if (masterHeaders.indexOf('resident_id') === -1) {
+      checks.push({ status: 'error', message: 'Master is missing resident_id.' });
+    } else {
+      checks.push({ status: 'ok', message: 'Master has resident_id.' });
+    }
+  } catch (e) {
+    checks.push({ status: 'error', message: e.message });
+  }
+  return checks;
+}
+
+/**
+ * @param {string} folderId
+ * @param {Array<string>} requiredHeaders
+ * @param {boolean} includeZones
+ * @return {Array<{status: string, message: string}>}
+ */
+function validateFolderSheets_(folderId, requiredHeaders, includeZones) {
+  var checks = [];
+  if (!folderId) return [{ status: 'error', message: 'User sheets folder is not set.' }];
+  try {
+    var files = getGoogleSheetFilesInFolder_(folderId);
+    checks.push({ status: files.length > 0 ? 'ok' : 'warning', message: 'Folder found with ' + files.length + ' Google Sheets.' });
+    if (files.length === 0) return checks;
+
+    var missingSheets = [];
+    var zones = [];
+    for (var i = 0; i < files.length; i++) {
+      var ss = SpreadsheetApp.openById(files[i].getId());
+      var sheet = ss.getSheets()[0];
+      var data = sheet.getDataRange().getValues();
+      var headers = data.length > 0 ? data[0].map(function (h) { return String(h).trim(); }) : [];
+      var missing = findMissingHeaders_(headers, requiredHeaders);
+      if (missing.length > 0) {
+        missingSheets.push(files[i].getName() + ' missing ' + missing.join(', '));
+      }
+      if (includeZones && headers.indexOf('ZoneName') !== -1) {
+        zones.push(files[i].getName() + ': ' + (detectZoneFromData_(data, headers) || '(no zone detected)'));
+      }
+    }
+
+    if (missingSheets.length > 0) {
+      checks.push({ status: 'error', message: missingSheets.length + ' sheet(s) are missing required headers. First: ' + missingSheets[0] + '.' });
+    } else {
+      checks.push({ status: 'ok', message: 'All folder sheets have required headers: ' + requiredHeaders.join(', ') + '.' });
+    }
+    if (includeZones && zones.length > 0) {
+      checks.push({ status: 'ok', message: 'Detected zones: ' + zones.slice(0, 8).join('; ') + (zones.length > 8 ? '; ...' : '') });
+    }
+  } catch (e) {
+    checks.push({ status: 'error', message: e.message });
+  }
+  return checks;
+}
+
+/**
+ * @param {Array<Array>} data
+ * @param {Array<string>} headers
+ * @return {string}
+ */
+function detectZoneFromData_(data, headers) {
+  var zoneCol = headers.indexOf('ZoneName');
+  if (zoneCol === -1) return '';
+  var counts = {};
+  for (var r = 1; r < data.length; r++) {
+    var zone = String(data[r][zoneCol] || '').trim();
+    if (zone !== '') counts[zone] = (counts[zone] || 0) + 1;
+  }
+  var detected = '';
+  var max = 0;
+  Object.keys(counts).forEach(function (zone) {
+    if (counts[zone] > max) {
+      detected = zone;
+      max = counts[zone];
+    }
+  });
+  return detected;
+}
+
+/**
+ * @param {string} folderId
+ * @return {Array<GoogleAppsScript.Drive.File>}
+ */
+function getGoogleSheetFilesInFolder_(folderId) {
+  var folder = DriveApp.getFolderById(folderId);
+  var iter = folder.getFilesByType(MimeType.GOOGLE_SHEETS);
+  var files = [];
+  while (iter.hasNext()) files.push(iter.next());
+  files.sort(function (a, b) { return a.getName().localeCompare(b.getName()); });
+  return files;
 }
 
 // -------  Import → Master  -------
@@ -547,6 +881,283 @@ function executePushToFolderWorkflow_(configSs, config, dryRun, logTab) {
     conflicts: totals.conflicts,
     skipped: totals.skipped,
     errors: totals.errors
+  };
+}
+
+/**
+ * Shared implementation for appending missing master residents into every
+ * captain sheet in a folder.
+ *
+ * @param {SpreadsheetApp.Spreadsheet} configSs
+ * @param {Object} config
+ * @param {boolean} dryRun
+ * @param {string} appendLogTab
+ * @param {string} flagLogTab
+ * @return {Object}
+ */
+function executePushMissingRowsToFolderWorkflow_(configSs, config, dryRun, appendLogTab, flagLogTab) {
+  var masterSs = SpreadsheetApp.openById(config.masterId);
+  var masterSheet = masterSs.getSheets()[0];
+  var masterData = masterSheet.getDataRange().getValues();
+  if (masterData.length === 0) throw new Error('Master spreadsheet is empty.');
+  var masterHdrs = masterData[0].map(function (h) { return String(h).trim(); });
+
+  var files = getGoogleSheetFilesInFolder_(config.folderId);
+  var oldA = configSs.getSheetByName(appendLogTab); if (oldA) configSs.deleteSheet(oldA);
+  var oldF = configSs.getSheetByName(flagLogTab);   if (oldF) configSs.deleteSheet(oldF);
+
+  var totals = {
+    sheetsProcessed: files.length,
+    rowsAppended: 0,
+    sensitiveFlags: 0,
+    skipped: 0,
+    errors: 0,
+    detectedZones: []
+  };
+
+  for (var i = 0; i < files.length; i++) {
+    var file = files[i];
+    var fileName = file.getName();
+    try {
+      var ss = SpreadsheetApp.openById(file.getId());
+      var sheet = ss.getSheets()[0];
+      var result = appendMissingRowsToSheet_(sheet, masterData, masterHdrs, config.sensitiveColumns, dryRun);
+
+      appendToMissingRowsLog_(configSs, appendLogTab, fileName, result.detectedZone, result);
+      if (result.flagged.length > 0) {
+        appendToFlaggedSensitiveLog_(configSs, flagLogTab, fileName, result.detectedZone, result);
+      }
+
+      totals.rowsAppended += result.appended.length;
+      totals.sensitiveFlags += result.flagged.length;
+      totals.skipped += result.skipped ? result.skipped.length : 0;
+      totals.errors += result.errors.length;
+      totals.detectedZones.push(fileName + ': ' + (result.detectedZone || '(none)'));
+    } catch (e) {
+      appendToMissingRowsLog_(configSs, appendLogTab, fileName, '', {
+        appended: [], flagged: [], skipped: [], errors: [{ message: e.message }], detectedZone: ''
+      });
+      totals.errors++;
+      totals.detectedZones.push(fileName + ': (error)');
+    }
+  }
+
+  return {
+    sourceSpreadsheet: masterSs.getName(),
+    targetSpreadsheet: 'User Sheets Folder',
+    logTab: appendLogTab,
+    secondaryLogTab: totals.sensitiveFlags > 0 ? flagLogTab : '',
+    sheetsProcessed: totals.sheetsProcessed,
+    columnsAdded: 0,
+    cellsFilled: 0,
+    cellsOverwritten: 0,
+    conflicts: 0,
+    rowsAppended: totals.rowsAppended,
+    sensitiveFlags: totals.sensitiveFlags,
+    skipped: totals.skipped,
+    errors: totals.errors,
+    detectedZones: totals.detectedZones,
+    metrics: [
+      { label: 'Sheets processed', value: totals.sheetsProcessed },
+      { label: 'Rows appended', value: totals.rowsAppended },
+      { label: 'Sensitive flags', value: totals.sensitiveFlags },
+      { label: 'Skipped rows', value: totals.skipped },
+      { label: 'Errors', value: totals.errors }
+    ],
+    summaryLines: ['Detected zones: ' + totals.detectedZones.slice(0, 8).join('; ') + (totals.detectedZones.length > 8 ? '; ...' : '')]
+  };
+}
+
+/**
+ * Shared implementation for Pull Data <- folder.
+ *
+ * @param {SpreadsheetApp.Spreadsheet} configSs
+ * @param {Object} config
+ * @param {boolean} dryRun
+ * @param {string} logTab
+ * @return {Object}
+ */
+function executePullDataFromFolderWorkflow_(configSs, config, dryRun, logTab) {
+  var masterSs = SpreadsheetApp.openById(config.masterId);
+  var masterSheet = masterSs.getSheets()[0];
+  var pullState = buildMasterPullDataState_(masterSheet);
+  var files = getGoogleSheetFilesInFolder_(config.folderId);
+
+  var old = configSs.getSheetByName(logTab);
+  if (old) configSs.deleteSheet(old);
+
+  var totals = { columnsAdded: 0, appended: 0, filled: 0, overwritten: 0, conflicts: 0, skipped: 0, errors: 0 };
+  for (var i = 0; i < files.length; i++) {
+    var file = files[i];
+    var fileName = file.getName();
+    try {
+      var ss = SpreadsheetApp.openById(file.getId());
+      var sheet = ss.getSheets()[0];
+      var result = pullDataIntoMaster_(masterSheet, sheet, fileName, config.pullColumnPolicies, dryRun, pullState);
+      appendToPullDataLog_(configSs, logTab, fileName, result);
+      totals.columnsAdded += result.columnsAdded.length;
+      totals.appended += result.appended.length;
+      totals.filled += result.filled.length;
+      totals.overwritten += result.overwritten.length;
+      totals.conflicts += result.conflicts.length;
+      totals.skipped += result.skipped.length;
+      totals.errors += result.errors.length;
+    } catch (e) {
+      appendToPullDataLog_(configSs, logTab, fileName, {
+        columnsAdded: [], appended: [], filled: [], overwritten: [], conflicts: [], skipped: [], errors: [{ message: e.message }]
+      });
+      totals.errors++;
+    }
+  }
+
+  return {
+    sourceSpreadsheet: 'User Sheets Folder',
+    targetSpreadsheet: masterSs.getName(),
+    logTab: logTab,
+    sheetsProcessed: files.length,
+    columnsAdded: totals.columnsAdded,
+    cellsFilled: totals.filled,
+    cellsOverwritten: totals.overwritten,
+    conflicts: totals.conflicts,
+    rowsAppended: totals.appended,
+    skipped: totals.skipped,
+    errors: totals.errors,
+    metrics: [
+      { label: 'Sheets processed', value: files.length },
+      { label: 'Columns added', value: totals.columnsAdded },
+      { label: 'Rows appended', value: totals.appended },
+      { label: 'Filled', value: totals.filled },
+      { label: 'Overwritten', value: totals.overwritten },
+      { label: 'Conflicts', value: totals.conflicts },
+      { label: 'Skipped', value: totals.skipped },
+      { label: 'Errors', value: totals.errors }
+    ],
+    summaryLines: ['Policy effects: fill_blank fills only blank master cells; overwrite replaces non-blank master values; conflict logs differences without writing; never skips the column.']
+  };
+}
+
+/**
+ * Shared implementation for Pull Missing Rows <- folder.
+ *
+ * @param {SpreadsheetApp.Spreadsheet} configSs
+ * @param {Object} config
+ * @param {boolean} dryRun
+ * @param {string} logTab
+ * @return {Object}
+ */
+function executePullMissingRowsFromFolderWorkflow_(configSs, config, dryRun, logTab) {
+  var masterSs = SpreadsheetApp.openById(config.masterId);
+  var masterSheet = masterSs.getSheets()[0];
+  var masterState = buildMasterPullState_(masterSheet);
+  var files = getGoogleSheetFilesInFolder_(config.folderId);
+
+  var old = configSs.getSheetByName(logTab);
+  if (old) configSs.deleteSheet(old);
+
+  var totals = { columnsAdded: 0, appended: 0, skipped: 0, errors: 0 };
+  for (var i = 0; i < files.length; i++) {
+    var file = files[i];
+    var fileName = file.getName();
+    try {
+      var ss = SpreadsheetApp.openById(file.getId());
+      var sheet = ss.getSheets()[0];
+      var result = appendMissingRowsToMaster_(masterSheet, sheet, fileName, dryRun, masterState);
+      appendToPullMissingRowsLog_(configSs, logTab, fileName, result);
+      totals.columnsAdded += result.columnsAdded.length;
+      totals.appended += result.appended.length;
+      totals.skipped += result.skipped.length;
+      totals.errors += result.errors.length;
+    } catch (e) {
+      appendToPullMissingRowsLog_(configSs, logTab, fileName, {
+        columnsAdded: [], appended: [], skipped: [], errors: [{ message: e.message }]
+      });
+      totals.errors++;
+    }
+  }
+
+  return {
+    sourceSpreadsheet: 'User Sheets Folder',
+    targetSpreadsheet: masterSs.getName(),
+    logTab: logTab,
+    sheetsProcessed: files.length,
+    columnsAdded: totals.columnsAdded,
+    cellsFilled: 0,
+    cellsOverwritten: 0,
+    conflicts: 0,
+    rowsAppended: totals.appended,
+    skipped: totals.skipped,
+    errors: totals.errors,
+    metrics: [
+      { label: 'Sheets processed', value: files.length },
+      { label: 'Source-only columns added', value: totals.columnsAdded },
+      { label: 'Rows appended to master', value: totals.appended },
+      { label: 'Blank/duplicate ID skips', value: totals.skipped },
+      { label: 'Errors', value: totals.errors }
+    ],
+    summaryLines: ['Skipped rows include blank resident_id values and duplicate resident_id values already in master or encountered earlier in this run.']
+  };
+}
+
+/**
+ * Shared implementation for Rename Columns -> folder.
+ *
+ * @param {SpreadsheetApp.Spreadsheet} configSs
+ * @param {Object} config
+ * @param {boolean} dryRun
+ * @param {string} logTab
+ * @return {Object}
+ */
+function executeRenameColumnsInFolderWorkflow_(configSs, config, dryRun, logTab) {
+  var files = getGoogleSheetFilesInFolder_(config.folderId);
+  var old = configSs.getSheetByName(logTab);
+  if (old) configSs.deleteSheet(old);
+
+  var totalRenamed = 0, totalSkipped = 0, totalErrors = 0;
+  for (var i = 0; i < files.length; i++) {
+    var file = files[i];
+    var fileName = file.getName();
+    try {
+      var ss = SpreadsheetApp.openById(file.getId());
+      var sheet = ss.getSheets()[0];
+      var result = renameColumnInTarget_(sheet, config.renameFrom, config.renameTo, dryRun);
+      appendToRenameLog_(configSs, logTab, fileName, config.renameFrom, config.renameTo, result);
+      if (result.renamed) totalRenamed++;
+      else if (result.skipped) totalSkipped++;
+      else totalErrors++;
+    } catch (e) {
+      appendToRenameLog_(configSs, logTab, fileName, config.renameFrom, config.renameTo, {
+        renamed: false,
+        skipped: false,
+        error: e.message,
+        note: ''
+      });
+      totalErrors++;
+    }
+  }
+
+  return {
+    sourceSpreadsheet: 'User Sheets Folder',
+    targetSpreadsheet: 'Captain sheet headers',
+    logTab: logTab,
+    sheetsProcessed: files.length,
+    columnsAdded: 0,
+    cellsFilled: 0,
+    cellsOverwritten: 0,
+    conflicts: 0,
+    renamed: totalRenamed,
+    skipped: totalSkipped,
+    errors: totalErrors,
+    metrics: [
+      { label: 'Sheets processed', value: files.length },
+      { label: dryRun ? 'Headers that would rename' : 'Headers renamed', value: totalRenamed },
+      { label: 'Skipped sheets', value: totalSkipped },
+      { label: 'Errors', value: totalErrors }
+    ],
+    summaryLines: [
+      dryRun
+        ? 'Dry Run only previews row-1 header changes across the folder. Review this log before running live.'
+        : 'Live run changed only matching row-1 headers. Data rows were not edited.'
+    ]
   };
 }
 
@@ -1442,7 +2053,7 @@ function setupWorkflowPresetsTab_(ss) {
       'Sales History -> overwrite'
     ].join('\n');
 
-    tab.getRange(2, 1, 2, headers.length).setValues([
+    tab.getRange(2, 1, 6, headers.length).setValues([
       [
         'sales-import',
         'Update Master From Sales Tracker',
@@ -1470,11 +2081,68 @@ function setupWorkflowPresetsTab_(ss) {
         'Pushes dashboard-facing fields from master to every captain sheet in the folder. Start with Dry Run.',
         dashboardPolicies,
         settings.folderId || ''
+      ],
+      [
+        'push-missing-residents',
+        'Push Missing Residents to Captain Sheets',
+        'push_missing_rows_to_folder',
+        'Yes',
+        '',
+        '',
+        settings.masterId || '',
+        'resident_id',
+        '',
+        'Appends master residents missing from each captain sheet by detected ZoneName. Existing captain rows are never modified.',
+        '',
+        settings.folderId || ''
+      ],
+      [
+        'pull-captain-data',
+        'Pull Captain Data Into Master',
+        'pull_data_from_folder',
+        'Yes',
+        '',
+        '',
+        settings.masterId || '',
+        'resident_id',
+        '',
+        'Pulls captain-entered values into master using the Pull Column Policy tab. Start with Dry Run.',
+        '',
+        settings.folderId || ''
+      ],
+      [
+        'pull-missing-captain-rows',
+        'Pull Missing Captain Rows Into Master',
+        'pull_missing_rows_from_folder',
+        'Yes',
+        '',
+        '',
+        settings.masterId || '',
+        'resident_id',
+        '',
+        'Appends captain-created resident rows that do not already exist in master. Existing master rows are never modified.',
+        '',
+        settings.folderId || ''
+      ],
+      [
+        'rename-captain-column',
+        'Rename Column Across Captain Sheets',
+        'rename_columns_in_folder',
+        'Yes',
+        '',
+        '',
+        '',
+        '',
+        '',
+        'Renames one row-1 header across every captain sheet using Settings values. Dry Run is required for review before live changes.',
+        '',
+        settings.folderId || ''
       ]
     ]);
   } else {
     seedDefaultSalesImportPolicies_(tab);
     seedDefaultDashboardPushWorkflow_(tab, ss);
+    seedDefaultAdditionalSidebarWorkflows_(tab, ss);
   }
 
   tab.setColumnWidth(1, 150);
@@ -1564,6 +2232,78 @@ function seedDefaultDashboardPushWorkflow_(tab, ss) {
     'Column Policies': dashboardPolicies,
     'User Sheets Folder': settings.folderId || ''
   };
+
+  var row = [];
+  for (var c = 0; c < headers.length; c++) {
+    row.push(rowByHeader[headers[c]] || '');
+  }
+  tab.getRange(tab.getLastRow() + 1, 1, 1, headers.length).setValues([row]);
+}
+
+/**
+ * Adds the remaining guided sidebar workflows to existing preset tabs if they
+ * are missing.
+ *
+ * @param {SpreadsheetApp.Sheet} tab
+ * @param {SpreadsheetApp.Spreadsheet} ss
+ */
+function seedDefaultAdditionalSidebarWorkflows_(tab, ss) {
+  var settings = readMergeConfig_(ss);
+  appendWorkflowPresetIfMissing_(tab, {
+    'Workflow ID': 'push-missing-residents',
+    'Workflow Name': 'Push Missing Residents to Captain Sheets',
+    'Operation': 'push_missing_rows_to_folder',
+    'Enabled': 'Yes',
+    'Master Spreadsheet': settings.masterId || '',
+    'Match Column': 'resident_id',
+    'Notes': 'Appends master residents missing from each captain sheet by detected ZoneName. Existing captain rows are never modified.',
+    'User Sheets Folder': settings.folderId || ''
+  });
+  appendWorkflowPresetIfMissing_(tab, {
+    'Workflow ID': 'pull-captain-data',
+    'Workflow Name': 'Pull Captain Data Into Master',
+    'Operation': 'pull_data_from_folder',
+    'Enabled': 'Yes',
+    'Master Spreadsheet': settings.masterId || '',
+    'Match Column': 'resident_id',
+    'Notes': 'Pulls captain-entered values into master using the Pull Column Policy tab. Start with Dry Run.',
+    'User Sheets Folder': settings.folderId || ''
+  });
+  appendWorkflowPresetIfMissing_(tab, {
+    'Workflow ID': 'pull-missing-captain-rows',
+    'Workflow Name': 'Pull Missing Captain Rows Into Master',
+    'Operation': 'pull_missing_rows_from_folder',
+    'Enabled': 'Yes',
+    'Master Spreadsheet': settings.masterId || '',
+    'Match Column': 'resident_id',
+    'Notes': 'Appends captain-created resident rows that do not already exist in master. Existing master rows are never modified.',
+    'User Sheets Folder': settings.folderId || ''
+  });
+  appendWorkflowPresetIfMissing_(tab, {
+    'Workflow ID': 'rename-captain-column',
+    'Workflow Name': 'Rename Column Across Captain Sheets',
+    'Operation': 'rename_columns_in_folder',
+    'Enabled': 'Yes',
+    'Notes': 'Renames one row-1 header across every captain sheet using Settings values. Dry Run is required for review before live changes.',
+    'User Sheets Folder': settings.folderId || ''
+  });
+}
+
+/**
+ * @param {SpreadsheetApp.Sheet} tab
+ * @param {Object} rowByHeader
+ */
+function appendWorkflowPresetIfMissing_(tab, rowByHeader) {
+  var data = tab.getDataRange().getValues();
+  if (data.length === 0) return;
+  var headers = data[0].map(function (h) { return String(h).trim(); });
+  var idCol = headers.indexOf('Workflow ID');
+  if (idCol === -1) return;
+
+  var wantedId = String(rowByHeader['Workflow ID'] || '').trim();
+  for (var r = 1; r < data.length; r++) {
+    if (String(data[r][idCol] || '').trim() === wantedId) return;
+  }
 
   var row = [];
   for (var c = 0; c < headers.length; c++) {

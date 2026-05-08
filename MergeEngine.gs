@@ -1045,12 +1045,13 @@ function appendToRenameLog_(spreadsheet, tabName, sheetName, oldHeader, newHeade
  * @param {Array<string>} masterHeaders        Trimmed master header row
  * @param {Array<string>} sensitiveColumns     Column headers considered privacy-sensitive
  * @param {boolean} dryRun                     If true, compute only — never write
- * @return {{ appended: Array, flagged: Array, errors: Array, detectedZone: string }}
+ * @return {{ appended: Array, flagged: Array, skipped: Array, errors: Array, detectedZone: string }}
  */
 function appendMissingRowsToSheet_(targetSheet, masterData, masterHeaders, sensitiveColumns, dryRun) {
   var result = {
     appended: [],
     flagged: [],
+    skipped: [],
     errors: [],
     detectedZone: ''
   };
@@ -1138,11 +1139,17 @@ function appendMissingRowsToSheet_(targetSheet, masterData, masterHeaders, sensi
   for (var mr = 1; mr < masterData.length; mr++) {
     var masterRow = masterData[mr];
     var masterId = String(masterRow[masterIdCol] || '').trim();
-    if (masterId === '' || masterId === 'undefined' || masterId === 'null') continue;
-
     var masterZone = String(masterRow[masterZoneCol] || '').trim();
     if (masterZone !== detectedZone) continue;
-    if (existing[masterId]) continue;
+    if (masterId === '' || masterId === 'undefined' || masterId === 'null') {
+      result.skipped.push({
+        residentId: '',
+        residentName: '',
+        masterRow: mr + 1,
+        reason: 'Blank resident_id'
+      });
+      continue;
+    }
 
     var newRow = [];
     for (var c = 0; c < targetHeaders.length; c++) {
@@ -1151,6 +1158,16 @@ function appendMissingRowsToSheet_(targetSheet, masterData, masterHeaders, sensi
     }
 
     var residentName = (masterNameCol !== -1) ? String(masterRow[masterNameCol] || '').trim() : '';
+
+    if (existing[masterId]) {
+      result.skipped.push({
+        residentId: masterId,
+        residentName: residentName,
+        masterRow: mr + 1,
+        reason: 'resident_id already exists in target sheet or earlier master row'
+      });
+      continue;
+    }
 
     var flaggedCols = [];
     for (var sc = 0; sc < sensitiveMasterCols.length; sc++) {
@@ -1639,11 +1656,11 @@ function makePullDataCellResult_(sourceRow, masterRow, residentId, residentName,
  * @param {string} tabName
  * @param {string} sheetName
  * @param {string} detectedZone
- * @param {{ appended: Array, flagged: Array, errors: Array, detectedZone: string }} result
+ * @param {{ appended: Array, flagged: Array, skipped: Array, errors: Array, detectedZone: string }} result
  */
 function appendToMissingRowsLog_(spreadsheet, tabName, sheetName, detectedZone, result) {
   var tab = spreadsheet.getSheetByName(tabName);
-  var header = ['Spreadsheet', 'Detected Zone', 'resident_id', 'Resident Name', 'Master Row #', 'Status'];
+  var header = ['Spreadsheet', 'Detected Zone', 'resident_id', 'Resident Name', 'Master Row #', 'Status', 'Notes'];
   if (!tab) {
     tab = spreadsheet.insertSheet(tabName);
     tab.getRange(1, 1, 1, header.length).setValues([header]);
@@ -1654,10 +1671,16 @@ function appendToMissingRowsLog_(spreadsheet, tabName, sheetName, detectedZone, 
   var newRows = [];
   for (var i = 0; i < result.appended.length; i++) {
     var a = result.appended[i];
-    newRows.push([sheetName, detectedZone, a.residentId, a.residentName, a.masterRow, 'Appended']);
+    newRows.push([sheetName, detectedZone, a.residentId, a.residentName, a.masterRow, 'Appended', '']);
   }
-  for (var j = 0; j < result.errors.length; j++) {
-    newRows.push([sheetName, detectedZone || '(none)', '', '', '', 'Error: ' + result.errors[j].message]);
+  if (result.skipped) {
+    for (var j = 0; j < result.skipped.length; j++) {
+      var skipped = result.skipped[j];
+      newRows.push([sheetName, detectedZone, skipped.residentId, skipped.residentName, skipped.masterRow, 'Skipped', skipped.reason]);
+    }
+  }
+  for (var k = 0; k < result.errors.length; k++) {
+    newRows.push([sheetName, detectedZone || '(none)', '', '', '', 'Error', result.errors[k].message]);
   }
 
   if (newRows.length > 0) {

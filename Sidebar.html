@@ -306,14 +306,7 @@
 
         <div id="resultPanel" class="section hidden">
           <h3 id="resultTitle">Last Result</h3>
-          <div class="result-grid">
-            <div class="result-stat"><strong id="columnsAdded">0</strong><span>Columns added</span></div>
-            <div class="result-stat"><strong id="cellsFilled">0</strong><span>Filled</span></div>
-            <div class="result-stat"><strong id="cellsOverwritten">0</strong><span>Overwritten</span></div>
-            <div class="result-stat"><strong id="conflicts">0</strong><span>Conflicts</span></div>
-            <div class="result-stat"><strong id="skipped">0</strong><span>Skipped</span></div>
-            <div class="result-stat"><strong id="errors">0</strong><span>Errors</span></div>
-          </div>
+          <div id="resultGrid" class="result-grid"></div>
           <p id="resultLog" class="muted" style="margin-top: 10px;"></p>
         </div>
       </section>
@@ -359,9 +352,12 @@
           button.type = 'button';
           button.setAttribute('data-workflow-id', workflow.id);
           button.className = 'workflow-card' + (workflow.id === state.selectedWorkflowId ? ' active' : '');
+          var subtitle = workflow.mappingCount > 0
+            ? workflow.mappingCount + ' mapped column' + (workflow.mappingCount === 1 ? '' : 's') + ' · match by ' + escapeHtml(workflow.matchColumn || '(not set)')
+            : escapeHtml(workflow.sourceLabel || workflow.operation);
           button.innerHTML =
             '<span class="workflow-title">' + escapeHtml(workflow.name) + '</span>' +
-            '<span class="muted">' + workflow.mappingCount + ' mapped columns · match by ' + escapeHtml(workflow.matchColumn || '(not set)') + '</span>';
+            '<span class="muted">' + subtitle + '</span>';
           button.onclick = function () { loadWorkflow(workflow.id); };
           list.appendChild(button);
         });
@@ -380,7 +376,10 @@
 
         var mappingList = document.getElementById('mappingList');
         mappingList.innerHTML = '';
-        workflow.mappings.forEach(function (mapping) {
+        if (!workflow.mappings || workflow.mappings.length === 0) {
+          mappingList.innerHTML = '<p class="muted">No column mappings are needed for this workflow.</p>';
+        }
+        (workflow.mappings || []).forEach(function (mapping) {
           var item = document.createElement('div');
           item.className = 'mapping';
           item.innerHTML =
@@ -408,15 +407,31 @@
       function renderResult(result) {
         document.getElementById('resultPanel').classList.remove('hidden');
         document.getElementById('resultTitle').textContent = result.mode + ' Complete';
-        document.getElementById('columnsAdded').textContent = result.columnsAdded;
-        document.getElementById('cellsFilled').textContent = result.cellsFilled;
-        document.getElementById('cellsOverwritten').textContent = result.cellsOverwritten || 0;
-        document.getElementById('conflicts').textContent = result.conflicts;
-        document.getElementById('skipped').textContent = result.skipped || 0;
-        document.getElementById('errors').textContent = result.errors;
+        renderResultMetrics(result);
         var processed = result.sheetsProcessed ? result.sheetsProcessed + ' sheet(s) processed. ' : '';
+        var extraLogs = result.secondaryLogTab ? ' Also review "' + result.secondaryLogTab + '".' : '';
+        var summary = result.summaryLines && result.summaryLines.length ? ' ' + result.summaryLines.join(' ') : '';
         document.getElementById('resultLog').textContent =
-          processed + 'Details were written to "' + result.logTab + '".';
+          processed + 'Details were written to "' + result.logTab + '".' + extraLogs + summary;
+      }
+
+      function renderResultMetrics(result) {
+        var grid = document.getElementById('resultGrid');
+        grid.innerHTML = '';
+        var metrics = result.metrics || [
+          { label: 'Columns added', value: result.columnsAdded || 0 },
+          { label: 'Filled', value: result.cellsFilled || 0 },
+          { label: 'Overwritten', value: result.cellsOverwritten || 0 },
+          { label: 'Conflicts', value: result.conflicts || 0 },
+          { label: 'Skipped', value: result.skipped || 0 },
+          { label: 'Errors', value: result.errors || 0 }
+        ];
+        metrics.forEach(function (metric) {
+          var item = document.createElement('div');
+          item.className = 'result-stat';
+          item.innerHTML = '<strong>' + escapeHtml(metric.value) + '</strong><span>' + escapeHtml(metric.label) + '</span>';
+          grid.appendChild(item);
+        });
       }
 
       function loadDashboard() {
@@ -474,7 +489,7 @@
 
       function runWorkflow(dryRun) {
         setBusy(true);
-        setStatus(dryRun ? 'Running dry run...' : 'Running live import...');
+        setStatus(dryRun ? 'Running dry run...' : 'Running live workflow...');
         var call = google.script.run
           .withSuccessHandler(function (result) {
             renderResult(result);

@@ -133,7 +133,15 @@ Operations for managing data and schema across your master spreadsheet and user 
 
    Unlisted columns default to `conflict`, and `resident_id` is always protected as `never`.
 
-8. For guided workflows, review the Workflow Presets tab and then click **Sheet Smart → Open Dashboard**. The first supported sidebar workflows are **Update Master From Sales Tracker** and **Push Dashboard Fields to Captain Sheets**. Start with **Dry Run** and review fills/overwrites/conflicts before running live.
+8. For guided workflows, review the Workflow Presets tab and then click **Sheet Smart → Open Dashboard**. The sidebar shows workflow cards and waits for you to choose one. Start with **Dry Run** and review the generated log tab before running live.
+
+   Supported sidebar workflows:
+   - **Update Master From Sales Tracker** — updates master from the sales rollup by APN.
+   - **Push Dashboard Fields to Captain Sheets** — pushes selected dashboard fields from master to the captain sheets by APN.
+   - **Push Missing Residents to Captain Sheets** — appends missing master residents to captain sheets by detected `ZoneName`; existing rows are never changed.
+   - **Pull Captain Data Into Master** — applies `Pull Column Policy` while importing captain-entered values and appending missing rows.
+   - **Pull Missing Captain Rows Into Master** — appends captain-created rows missing from master and adds source-only headers first.
+   - **Rename Column Across Captain Sheets** — previews or renames one row-1 header across the captain folder; use Dry Run as the review step.
 
    Workflow `Column Policies` use one line per target/source column:
 
@@ -173,6 +181,10 @@ All logs land on tabs in the **Sheet Smart Config** spreadsheet. Each live run c
 | Rename Columns → User Sheets Folder | `Last Rename - Folder` | `Dry Run - Rename Folder` |
 | Sidebar workflow: Update Master From Sales Tracker | `Last Run - Update Master From Sales Tracker` | `Dry Run - Update Master From Sales Tracker` |
 | Sidebar workflow: Push Dashboard Fields to Captain Sheets | `Last Run - Push Dashboard Fields to Captain Sheets` | `Dry Run - Push Dashboard Fields to Captain Sheets` |
+| Sidebar workflow: Push Missing Residents to Captain Sheets | `Last Run - Push Missing Residents to Captain Sheets` | `Dry Run - Push Missing Residents to Captain Sheets` |
+| Sidebar workflow: Pull Captain Data Into Master | `Last Run - Pull Captain Data Into Master` | `Dry Run - Pull Captain Data Into Master` |
+| Sidebar workflow: Pull Missing Captain Rows Into Master | `Last Run - Pull Missing Captain Rows Into Master` | `Dry Run - Pull Missing Captain Rows Into Master` |
+| Sidebar workflow: Rename Column Across Captain Sheets | `Last Run - Rename Column Across Captain Sheets` | `Dry Run - Rename Column Across Captain Sheets` |
 
 The **Flagged - Sensitive Data** tab only appears when at least one appended row had a non-blank value in one or more `Sensitive Columns`. Each row lists the destination spreadsheet, the resident_id and name, and which sensitive columns were populated — so you can go to the captain whose zone the resident came from and confirm that sharing those notes with the new captain is okay.
 
