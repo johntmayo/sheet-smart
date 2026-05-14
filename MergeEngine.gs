@@ -10,6 +10,8 @@
 // project as Corrections.gs; all functions share one namespace.
 // ============================================================
 
+var SOURCE_LOOKUP_ROW_NUMBER_KEY_ = '__sheetSmartSourceRowNumber';
+
 /**
  * Reads the Settings and Column Mapping tabs from the config
  * spreadsheet and returns a structured config object.
@@ -399,10 +401,37 @@ function buildSourceLookup_(sourceData, headers, matchColumn) {
     for (var c = 0; c < headers.length; c++) {
       record[headers[c]] = row[c];
     }
+    record[SOURCE_LOOKUP_ROW_NUMBER_KEY_] = i + 1;
     lookup[key] = record;
   }
 
   return lookup;
+}
+
+/**
+ * Finds source records whose match key was never seen in the target sheet.
+ *
+ * @param {Object} sourceLookup
+ * @param {Object} targetKeys
+ * @param {string} matchColumn
+ * @return {Array<{row: number, column: string, existingValue: string, newValue: string, reason: string}>}
+ */
+function collectUnmatchedSourceRows_(sourceLookup, targetKeys, matchColumn) {
+  var unmatched = [];
+  for (var key in sourceLookup) {
+    if (!Object.prototype.hasOwnProperty.call(sourceLookup, key)) continue;
+    if (targetKeys[key]) continue;
+
+    var sourceRow = sourceLookup[key] || {};
+    unmatched.push({
+      row: sourceRow[SOURCE_LOOKUP_ROW_NUMBER_KEY_] || 0,
+      column: matchColumn,
+      existingValue: '(not found in target)',
+      newValue: key,
+      reason: 'Source row has no matching target row'
+    });
+  }
+  return unmatched;
 }
 
 /**
@@ -418,11 +447,14 @@ function buildSourceLookup_(sourceData, headers, matchColumn) {
  *        just "added" in dry-run mode (i.e. not actually written to the sheet
  *        yet). Treated as if present in the target header row so fills can be
  *        logged instead of reported as missing-column errors.
- * @return {{ filled: Array, conflicts: Array, errors: Array }}
+ * @param {boolean=} logUnmatchedSourceRows    If true, source keys absent from
+ *        the target are returned for logging.
+ * @return {{ filled: Array, conflicts: Array, unmatchedSourceRows: Array, errors: Array }}
  */
-function mergeIntoTarget_(targetSheet, sourceLookup, matchColumn, columnMap, dryRun, virtualAddedColumns) {
+function mergeIntoTarget_(targetSheet, sourceLookup, matchColumn, columnMap, dryRun, virtualAddedColumns, logUnmatchedSourceRows) {
   var filled = [];
   var conflicts = [];
+  var unmatchedSourceRows = [];
   var errors = [];
 
   var data = targetSheet.getDataRange().getValues();
@@ -474,10 +506,12 @@ function mergeIntoTarget_(targetSheet, sourceLookup, matchColumn, columnMap, dry
   }
 
   var writeQueue = [];
+  var targetKeys = {};
 
   for (var r = 1; r < data.length; r++) {
     var matchKey = String(data[r][matchIdx]).trim();
     if (matchKey === '' || matchKey === 'undefined' || matchKey === 'null') continue;
+    targetKeys[matchKey] = true;
 
     var sourceRow = sourceLookup[matchKey];
     if (!sourceRow) continue;
@@ -527,6 +561,9 @@ function mergeIntoTarget_(targetSheet, sourceLookup, matchColumn, columnMap, dry
       }
     }
   }
+  if (logUnmatchedSourceRows) {
+    unmatchedSourceRows = collectUnmatchedSourceRows_(sourceLookup, targetKeys, matchColumn);
+  }
 
   if (!dryRun) {
     for (var w = 0; w < writeQueue.length; w++) {
@@ -539,7 +576,7 @@ function mergeIntoTarget_(targetSheet, sourceLookup, matchColumn, columnMap, dry
     }
   }
 
-  return { filled: filled, conflicts: conflicts, errors: errors };
+  return { filled: filled, conflicts: conflicts, unmatchedSourceRows: unmatchedSourceRows, errors: errors };
 }
 
 /**
@@ -554,13 +591,15 @@ function mergeIntoTarget_(targetSheet, sourceLookup, matchColumn, columnMap, dry
  * @param {Object} columnPolicies
  * @param {boolean} dryRun
  * @param {Array<string>=} virtualAddedColumns
- * @return {{ filled: Array, overwritten: Array, conflicts: Array, skipped: Array, errors: Array }}
+ * @param {boolean=} logUnmatchedSourceRows
+ * @return {{ filled: Array, overwritten: Array, conflicts: Array, skipped: Array, unmatchedSourceRows: Array, errors: Array }}
  */
-function mergeIntoTargetWithPolicies_(targetSheet, sourceLookup, matchColumn, columnMap, columnPolicies, dryRun, virtualAddedColumns) {
+function mergeIntoTargetWithPolicies_(targetSheet, sourceLookup, matchColumn, columnMap, columnPolicies, dryRun, virtualAddedColumns, logUnmatchedSourceRows) {
   var filled = [];
   var overwritten = [];
   var conflicts = [];
   var skipped = [];
+  var unmatchedSourceRows = [];
   var errors = [];
   var policies = columnPolicies || {};
 
@@ -608,9 +647,11 @@ function mergeIntoTargetWithPolicies_(targetSheet, sourceLookup, matchColumn, co
   }
 
   var writeQueue = [];
+  var targetKeys = {};
   for (var r = 1; r < data.length; r++) {
     var matchKey = String(data[r][matchIdx]).trim();
     if (matchKey === '' || matchKey === 'undefined' || matchKey === 'null') continue;
+    targetKeys[matchKey] = true;
 
     var sourceRow = sourceLookup[matchKey];
     if (!sourceRow) continue;
@@ -688,6 +729,9 @@ function mergeIntoTargetWithPolicies_(targetSheet, sourceLookup, matchColumn, co
       }
     }
   }
+  if (logUnmatchedSourceRows) {
+    unmatchedSourceRows = collectUnmatchedSourceRows_(sourceLookup, targetKeys, matchColumn);
+  }
 
   if (!dryRun) {
     for (var w = 0; w < writeQueue.length; w++) {
@@ -700,7 +744,7 @@ function mergeIntoTargetWithPolicies_(targetSheet, sourceLookup, matchColumn, co
     }
   }
 
-  return { filled: filled, overwritten: overwritten, conflicts: conflicts, skipped: skipped, errors: errors };
+  return { filled: filled, overwritten: overwritten, conflicts: conflicts, skipped: skipped, unmatchedSourceRows: unmatchedSourceRows, errors: errors };
 }
 
 /**
@@ -858,6 +902,12 @@ function appendToSyncLog_(spreadsheet, tabName, sheetName, addResult, mergeResul
     for (var s = 0; s < mergeResult.skipped.length; s++) {
       var skipped = mergeResult.skipped[s];
       newRows.push(['Skipped', sheetName, skipped.row, skipped.column, skipped.existingValue, skipped.reason || 'Skipped by policy']);
+    }
+  }
+  if (mergeResult.unmatchedSourceRows) {
+    for (var u = 0; u < mergeResult.unmatchedSourceRows.length; u++) {
+      var unmatched = mergeResult.unmatchedSourceRows[u];
+      newRows.push(['Unmatched Source', sheetName, unmatched.row, unmatched.column, unmatched.existingValue, unmatched.newValue]);
     }
   }
   for (var m = 0; m < mergeResult.errors.length; m++) {

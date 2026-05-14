@@ -741,6 +741,7 @@ function runImport_(dryRun) {
       'Cells overwritten: '           + summary.cellsOverwritten + '\n' +
       'Conflicts (not overwritten): ' + summary.conflicts + '\n' +
       'Skipped: '                     + summary.skipped + '\n' +
+      'Source rows not in master: '   + summary.unmatchedSourceRows + '\n' +
       'Errors: '                      + summary.errors + '\n\n' +
       'See the "' + logTab + '" tab for details.'
     );
@@ -775,8 +776,8 @@ function executeImportToMaster_(configSs, config, dryRun, logTab) {
   var virtualCols = addResult.added.map(function (a) { return a.column; });
   var hasImportPolicies = config.importColumnPolicies && Object.keys(config.importColumnPolicies).length > 0;
   var mergeResult = hasImportPolicies
-    ? mergeIntoTargetWithPolicies_(masterSheet, sourceLookup, config.matchColumn, config.columnMap, config.importColumnPolicies, dryRun, virtualCols)
-    : mergeIntoTarget_(masterSheet, sourceLookup, config.matchColumn, config.columnMap, dryRun, virtualCols);
+    ? mergeIntoTargetWithPolicies_(masterSheet, sourceLookup, config.matchColumn, config.columnMap, config.importColumnPolicies, dryRun, virtualCols, true)
+    : mergeIntoTarget_(masterSheet, sourceLookup, config.matchColumn, config.columnMap, dryRun, virtualCols, true);
 
   var old = configSs.getSheetByName(logTab);
   if (old) configSs.deleteSheet(old);
@@ -792,7 +793,17 @@ function executeImportToMaster_(configSs, config, dryRun, logTab) {
     cellsOverwritten: mergeResult.overwritten ? mergeResult.overwritten.length : 0,
     conflicts: mergeResult.conflicts.length,
     skipped: mergeResult.skipped ? mergeResult.skipped.length : 0,
-    errors: addResult.errors.length + mergeResult.errors.length
+    unmatchedSourceRows: mergeResult.unmatchedSourceRows ? mergeResult.unmatchedSourceRows.length : 0,
+    errors: addResult.errors.length + mergeResult.errors.length,
+    metrics: [
+      { label: 'Columns added', value: addResult.added.length },
+      { label: 'Filled', value: mergeResult.filled.length },
+      { label: 'Overwritten', value: mergeResult.overwritten ? mergeResult.overwritten.length : 0 },
+      { label: 'Conflicts', value: mergeResult.conflicts.length },
+      { label: 'Source rows not in master', value: mergeResult.unmatchedSourceRows ? mergeResult.unmatchedSourceRows.length : 0 },
+      { label: 'Errors', value: addResult.errors.length + mergeResult.errors.length }
+    ],
+    summaryLines: ['Rows marked "Unmatched Source" are present in the source spreadsheet but have no matching ' + config.matchColumn + ' in the master.']
   };
 }
 
