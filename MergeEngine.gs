@@ -87,6 +87,7 @@ function readWorkflowPresets_(configSpreadsheet) {
       sourceId: getRowValueByHeader_(row, headers, 'Source Spreadsheet'),
       sourceTabName: getRowValueByHeader_(row, headers, 'Source Tab'),
       masterId: getRowValueByHeader_(row, headers, 'Master Spreadsheet'),
+      userSheetId: getRowValueByHeader_(row, headers, 'User Sheet'),
       folderId: getRowValueByHeader_(row, headers, 'User Sheets Folder') || getRowValueByHeader_(row, headers, 'Target Folder'),
       matchColumn: getRowValueByHeader_(row, headers, 'Match Column'),
       columnMap: parseWorkflowColumnMap_(getRowValueByHeader_(row, headers, 'Column Mappings')),

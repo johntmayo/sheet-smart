@@ -74,6 +74,7 @@ Operations for managing data and schema across your master spreadsheet and user 
 | **Pull Missing Rows ← User Sheets Folder** | All sheets in a folder | Master | Same as above, but across every sheet in the folder |
 | **Pull Data ← User Sheet** | One user sheet | Master | Pull captain-entered values into existing master rows using `Pull Column Policy`; also appends missing rows |
 | **Pull Data ← User Sheets Folder** | All sheets in a folder | Master | Same as above, but across every sheet in the folder |
+| **Add Columns → User Sheet / Folder** | Workflow Presets (`Column Mappings`) | One user sheet or all sheets in a folder | Add configured row-1 headers when missing, without filling cells or changing rows |
 | **Rename Columns → User Sheets Folder** | Settings (`Rename Column - From`, `Rename Column - To`) | All sheets in a folder | Rename one header across all user sheets without touching row data |
 
 > The regular **Push** operations only fill blank cells inside existing rows — they never add rows. The **Push Missing Rows** and **Pull Missing Rows** operations only add rows — they never modify existing ones. Use Push and Pull together to keep user sheets and master aligned.
@@ -138,9 +139,11 @@ Operations for managing data and schema across your master spreadsheet and user 
    Supported sidebar workflows:
    - **Update Master From Sales Tracker** — updates master from the sales rollup by APN.
    - **Push Dashboard Fields to Captain Sheets** — pushes selected dashboard fields from master to the captain sheets by APN.
-   - **Push Missing Residents to Captain Sheets** — appends missing master residents to captain sheets by detected `ZoneName`; existing rows are never changed.
+   - **Push Missing Residents to Captain Sheets** — appends missing master residents to all captain sheets by detected `ZoneName`; existing rows are never changed.
+   - **Push Missing Residents to One Captain Sheet** — same append-only resident push, but only for the configured `User Sheet`.
    - **Pull Captain Data Into Master** — applies `Pull Column Policy` while importing captain-entered values and appending missing rows.
    - **Pull Missing Captain Rows Into Master** — appends captain-created rows missing from master and adds source-only headers first.
+   - **Add Columns to One Captain Sheet** / **Add Columns to Captain Sheets Folder** — adds configured row-1 headers only. Put one header per line in the workflow's `Column Mappings` cell.
    - **Rename Column Across Captain Sheets** — previews or renames one row-1 header across the captain folder; use Dry Run as the review step.
 
    Workflow `Column Policies` use one line per target/source column:
@@ -163,6 +166,7 @@ Operations for managing data and schema across your master spreadsheet and user 
 - **Push Missing Rows** appends whole new rows at the bottom of the target, populated by header-name join from master (every target column with a matching master header is filled). Existing rows are never modified; rows are never removed. Running it multiple times is safe — residents already in the sheet are skipped.
 - **Pull Missing Rows** appends whole new rows at the bottom of the master, populated by header-name join from each user sheet. User-sheet columns missing from master are added to master first. Existing master rows are never modified; rows are never removed. Running it multiple times is safe — residents already in master are skipped.
 - **Pull Data** updates existing master rows according to `Pull Column Policy`, then appends rows whose `resident_id` is not already in master. Source blank cells never overwrite master values.
+- **Add Columns workflows** append configured headers to row 1 only. They do not fill cells, append rows, rename headers, or reorder columns.
 - **Sidebar workflow imports** can also use per-column policies. In dry run, `overwrite` rows are listed as proposed overwrites; in live mode they are written.
 
 ### Where results go
@@ -182,8 +186,11 @@ All logs land on tabs in the **Sheet Smart Config** spreadsheet. Each live run c
 | Sidebar workflow: Update Master From Sales Tracker | `Last Run - Update Master From Sales Tracker` | `Dry Run - Update Master From Sales Tracker` |
 | Sidebar workflow: Push Dashboard Fields to Captain Sheets | `Last Run - Push Dashboard Fields to Captain Sheets` | `Dry Run - Push Dashboard Fields to Captain Sheets` |
 | Sidebar workflow: Push Missing Residents to Captain Sheets | `Last Run - Push Missing Residents to Captain Sheets` | `Dry Run - Push Missing Residents to Captain Sheets` |
+| Sidebar workflow: Push Missing Residents to One Captain Sheet | `Last Run - Push Missing Residents to One Captain Sheet` | `Dry Run - Push Missing Residents to One Captain Sheet` |
 | Sidebar workflow: Pull Captain Data Into Master | `Last Run - Pull Captain Data Into Master` | `Dry Run - Pull Captain Data Into Master` |
 | Sidebar workflow: Pull Missing Captain Rows Into Master | `Last Run - Pull Missing Captain Rows Into Master` | `Dry Run - Pull Missing Captain Rows Into Master` |
+| Sidebar workflow: Add Columns to One Captain Sheet | `Last Run - Add Columns to One Captain Sheet` | `Dry Run - Add Columns to One Captain Sheet` |
+| Sidebar workflow: Add Columns to Captain Sheets Folder | `Last Run - Add Columns to Captain Sheets Folder` | `Dry Run - Add Columns to Captain Sheets Folder` |
 | Sidebar workflow: Rename Column Across Captain Sheets | `Last Run - Rename Column Across Captain Sheets` | `Dry Run - Rename Column Across Captain Sheets` |
 
 The **Flagged - Sensitive Data** tab only appears when at least one appended row had a non-blank value in one or more `Sensitive Columns`. Each row lists the destination spreadsheet, the resident_id and name, and which sensitive columns were populated — so you can go to the captain whose zone the resident came from and confirm that sharing those notes with the new captain is okay.

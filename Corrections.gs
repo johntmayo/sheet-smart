@@ -2,45 +2,8 @@
 // Corrections.gs — UI & Entry Points for Sheet Smart
 // ============================================================
 // Container-bound script inside the "Sheet Smart Config"
-// spreadsheet. Provides a custom menu with these actions:
-//
-//   Import → Master              bring data INTO the master from
-//                                an external source spreadsheet
-//
-//   Push → User Sheet            push data FROM the master into
-//                                a single user spreadsheet
-//                                (fills blank cells in existing rows)
-//
-//   Push → User Sheets Folder    push data FROM the master into
-//                                every sheet in a Drive folder
-//                                (fills blank cells in existing rows)
-//
-//   Push Missing Rows → User Sheet
-//                                append rows from master whose
-//                                ZoneName matches the sheet's zone
-//                                and whose resident_id isn't present
-//
-//   Push Missing Rows → User Sheets Folder
-//                                same, across every sheet in a folder
-//
-//   Pull Missing Rows ← User Sheet
-//                                append captain-created rows from one
-//                                user sheet into the master
-//
-//   Pull Missing Rows ← User Sheets Folder
-//                                same, across every sheet in a folder
-//
-//   Pull Data ← User Sheet        pull captain-entered data into the
-//                                master using Pull Column Policy
-//
-//   Pull Data ← User Sheets Folder
-//                                same, across every sheet in a folder
-//
-//   Rename Columns → Folder      rename one header across every
-//                                sheet in a Drive folder
-//
-//   Set Up Config Tabs           format Settings, Column Mapping,
-//                                and Pull Column Policy
+// spreadsheet. Provides a compact custom menu that opens the guided
+// sidebar dashboard and initializes the config tabs.
 //
 // Cell-fill operations automatically add any missing target columns
 // before filling. Row-append operations never modify or remove
@@ -56,43 +19,12 @@ function onOpen() {
     .createMenu('Sheet Smart')
     .addItem('Open Dashboard', 'openSheetSmartDashboard')
     .addSeparator()
-    .addItem('Import → Master', 'importToMaster')
-    .addItem('Import → Master (Dry Run)', 'importToMasterDryRun')
-    .addSeparator()
-    .addItem('Push → User Sheet', 'pushToUserSheet')
-    .addItem('Push → User Sheet (Dry Run)', 'pushToUserSheetDryRun')
-    .addSeparator()
-    .addItem('Push → User Sheets Folder', 'pushToFolder')
-    .addItem('Push → User Sheets Folder (Dry Run)', 'pushToFolderDryRun')
-    .addSeparator()
-    .addItem('Push Missing Rows → User Sheet', 'pushMissingRowsToUserSheet')
-    .addItem('Push Missing Rows → User Sheet (Dry Run)', 'pushMissingRowsToUserSheetDryRun')
-    .addSeparator()
-    .addItem('Push Missing Rows → User Sheets Folder', 'pushMissingRowsToFolder')
-    .addItem('Push Missing Rows → User Sheets Folder (Dry Run)', 'pushMissingRowsToFolderDryRun')
-    .addSeparator()
-    .addItem('Pull Missing Rows ← User Sheet', 'pullMissingRowsFromUserSheet')
-    .addItem('Pull Missing Rows ← User Sheet (Dry Run)', 'pullMissingRowsFromUserSheetDryRun')
-    .addSeparator()
-    .addItem('Pull Missing Rows ← User Sheets Folder', 'pullMissingRowsFromFolder')
-    .addItem('Pull Missing Rows ← User Sheets Folder (Dry Run)', 'pullMissingRowsFromFolderDryRun')
-    .addSeparator()
-    .addItem('Pull Data ← User Sheet', 'pullDataFromUserSheet')
-    .addItem('Pull Data ← User Sheet (Dry Run)', 'pullDataFromUserSheetDryRun')
-    .addSeparator()
-    .addItem('Pull Data ← User Sheets Folder', 'pullDataFromFolder')
-    .addItem('Pull Data ← User Sheets Folder (Dry Run)', 'pullDataFromFolderDryRun')
-    .addSeparator()
-    .addItem('Rename Columns → User Sheets Folder', 'renameColumnsInFolder')
-    .addItem('Rename Columns → User Sheets Folder (Dry Run)', 'renameColumnsInFolderDryRun')
-    .addSeparator()
     .addItem('Set Up Config Tabs', 'setupConfigTabs')
     .addToUi();
 }
 
 /**
- * Opens the guided Sheet Smart sidebar. The existing menu operations remain
- * available, but the sidebar presents the common tasks as named workflows.
+ * Opens the guided Sheet Smart sidebar for running named workflows.
  */
 function openSheetSmartDashboard() {
   var html = HtmlService.createHtmlOutputFromFile('Sidebar')
@@ -172,12 +104,18 @@ function runWorkflowFromSidebar_(workflowId, dryRun) {
     result = executeImportToMaster_(configSs, workflow, dryRun, logTab);
   } else if (workflow.operation === 'push_to_folder') {
     result = executePushToFolderWorkflow_(configSs, workflow, dryRun, logTab);
+  } else if (workflow.operation === 'push_missing_rows_to_user_sheet') {
+    result = executePushMissingRowsToUserSheetWorkflow_(configSs, workflow, dryRun, logTab, dryRun ? 'Dry Run - Flagged Sensitive Data' : 'Flagged - Sensitive Data');
   } else if (workflow.operation === 'push_missing_rows_to_folder') {
     result = executePushMissingRowsToFolderWorkflow_(configSs, workflow, dryRun, logTab, dryRun ? 'Dry Run - Flagged Sensitive Data' : 'Flagged - Sensitive Data');
   } else if (workflow.operation === 'pull_data_from_folder') {
     result = executePullDataFromFolderWorkflow_(configSs, workflow, dryRun, logTab);
   } else if (workflow.operation === 'pull_missing_rows_from_folder') {
     result = executePullMissingRowsFromFolderWorkflow_(configSs, workflow, dryRun, logTab);
+  } else if (workflow.operation === 'add_columns_to_user_sheet') {
+    result = executeAddColumnsToUserSheetWorkflow_(configSs, workflow, dryRun, logTab);
+  } else if (workflow.operation === 'add_columns_to_folder') {
+    result = executeAddColumnsToFolderWorkflow_(configSs, workflow, dryRun, logTab);
   } else if (workflow.operation === 'rename_columns_in_folder') {
     result = executeRenameColumnsInFolderWorkflow_(configSs, workflow, dryRun, logTab);
   } else {
@@ -210,7 +148,7 @@ function buildWorkflowSidebarModel_(configSs, preset, includeChecks) {
     sourceTabName: workflow.sourceTabName,
     sourceLabel: getWorkflowSourceLabel_(workflow),
     matchColumn: getWorkflowMatchLabel_(workflow),
-    mappingCount: (workflow.operation === 'import_to_master' || workflow.operation === 'push_to_folder') ? mappings.length : 0,
+    mappingCount: (workflow.operation === 'import_to_master' || workflow.operation === 'push_to_folder' || workflow.operation === 'add_columns_to_user_sheet' || workflow.operation === 'add_columns_to_folder') ? mappings.length : 0,
     mappings: mappings,
     notes: getWorkflowNotes_(workflow),
     checks: checks,
@@ -227,9 +165,12 @@ function buildWorkflowSidebarModel_(configSs, preset, includeChecks) {
 function validateWorkflow_(workflow) {
   if (workflow.operation === 'import_to_master') return validateImportWorkflow_(workflow);
   if (workflow.operation === 'push_to_folder') return validatePushToFolderWorkflow_(workflow);
+  if (workflow.operation === 'push_missing_rows_to_user_sheet') return validatePushMissingRowsToUserSheetWorkflow_(workflow);
   if (workflow.operation === 'push_missing_rows_to_folder') return validatePushMissingRowsToFolderWorkflow_(workflow);
   if (workflow.operation === 'pull_data_from_folder') return validatePullDataFromFolderWorkflow_(workflow);
   if (workflow.operation === 'pull_missing_rows_from_folder') return validatePullMissingRowsFromFolderWorkflow_(workflow);
+  if (workflow.operation === 'add_columns_to_user_sheet') return validateAddColumnsToUserSheetWorkflow_(workflow);
+  if (workflow.operation === 'add_columns_to_folder') return validateAddColumnsToFolderWorkflow_(workflow);
   if (workflow.operation === 'rename_columns_in_folder') return validateRenameColumnsInFolderWorkflow_(workflow);
   return [{ status: 'error', message: 'Unsupported workflow operation: ' + workflow.operation }];
 }
@@ -252,6 +193,7 @@ function buildEffectiveWorkflowConfig_(preset, settings) {
     sourceId: preset.sourceId || settings.sourceId || '',
     sourceTabName: preset.sourceTabName || settings.sourceTabName || '',
     masterId: preset.masterId || settings.masterId || '',
+    userSheetId: preset.userSheetId || settings.userSheetId || '',
     folderId: preset.folderId || settings.folderId || '',
     matchColumn: preset.matchColumn || settings.matchColumn || '',
     renameFrom: settings.renameFrom || '',
@@ -271,11 +213,20 @@ function buildEffectiveWorkflowConfig_(preset, settings) {
  * @return {string}
  */
 function getWorkflowSourceLabel_(workflow) {
+  if (workflow.operation === 'push_missing_rows_to_user_sheet') {
+    return 'Master spreadsheet -> one captain sheet';
+  }
   if (workflow.operation === 'push_to_folder' || workflow.operation === 'push_missing_rows_to_folder') {
     return 'Master spreadsheet -> captain sheets folder';
   }
   if (workflow.operation === 'pull_data_from_folder' || workflow.operation === 'pull_missing_rows_from_folder') {
     return 'Captain sheets folder -> master spreadsheet';
+  }
+  if (workflow.operation === 'add_columns_to_user_sheet') {
+    return 'Configured headers -> one captain sheet';
+  }
+  if (workflow.operation === 'add_columns_to_folder') {
+    return 'Configured headers -> captain sheets folder';
   }
   if (workflow.operation === 'rename_columns_in_folder') {
     return 'Captain sheets folder headers';
@@ -290,8 +241,11 @@ function getWorkflowSourceLabel_(workflow) {
  * @return {string}
  */
 function getWorkflowMatchLabel_(workflow) {
-  if (workflow.operation === 'push_missing_rows_to_folder' || workflow.operation === 'pull_data_from_folder' || workflow.operation === 'pull_missing_rows_from_folder') {
+  if (workflow.operation === 'push_missing_rows_to_user_sheet' || workflow.operation === 'push_missing_rows_to_folder' || workflow.operation === 'pull_data_from_folder' || workflow.operation === 'pull_missing_rows_from_folder') {
     return 'resident_id';
+  }
+  if (workflow.operation === 'add_columns_to_user_sheet' || workflow.operation === 'add_columns_to_folder') {
+    return 'Header names only';
   }
   if (workflow.operation === 'rename_columns_in_folder') {
     return workflow.renameFrom && workflow.renameTo ? workflow.renameFrom + ' -> ' + workflow.renameTo : '(set Rename Column fields)';
@@ -309,11 +263,21 @@ function getWorkflowSidebarMappings_(workflow) {
   if (workflow.operation === 'pull_data_from_folder') {
     return getPullPolicySummaryRows_(workflow.pullColumnPolicies);
   }
-  if (workflow.operation === 'push_missing_rows_to_folder') {
+  if (workflow.operation === 'push_missing_rows_to_user_sheet' || workflow.operation === 'push_missing_rows_to_folder') {
     return [{ source: 'Master rows by ZoneName', target: 'Captain sheet rows', policy: 'append only; never edits existing rows' }];
   }
   if (workflow.operation === 'pull_missing_rows_from_folder') {
     return [{ source: 'Captain rows missing from master', target: 'Master rows', policy: 'append only; source-only headers are added first' }];
+  }
+  if (workflow.operation === 'add_columns_to_user_sheet' || workflow.operation === 'add_columns_to_folder') {
+    return workflow.columnMap.map(function (mapping) {
+      var columnName = mapping.target || mapping.source;
+      return {
+        source: columnName,
+        target: columnName,
+        policy: 'add if missing; existing columns unchanged'
+      };
+    });
   }
   if (workflow.operation === 'rename_columns_in_folder') {
     return [{ source: workflow.renameFrom || '(Rename Column - From)', target: workflow.renameTo || '(Rename Column - To)', policy: 'header row only; dry run strongly recommended' }];
@@ -350,6 +314,10 @@ function getWorkflowNotes_(workflow) {
     return (workflow.notes ? workflow.notes + ' ' : '') +
       'Dry Run only previews header changes. Live Run changes row 1 across every captain sheet in the folder.';
   }
+  if (workflow.operation === 'push_missing_rows_to_user_sheet') {
+    return (workflow.notes ? workflow.notes + ' ' : '') +
+      'This workflow only appends new resident rows to the configured User Sheet; existing captain rows are not modified or removed.';
+  }
   if (workflow.operation === 'push_missing_rows_to_folder') {
     return (workflow.notes ? workflow.notes + ' ' : '') +
       'This workflow only appends new resident rows; existing captain rows are not modified or removed.';
@@ -361,6 +329,10 @@ function getWorkflowNotes_(workflow) {
   if (workflow.operation === 'pull_data_from_folder') {
     return (workflow.notes ? workflow.notes + ' ' : '') +
       'Existing master values follow Pull Column Policy. Unlisted columns log conflicts; resident_id is never changed.';
+  }
+  if (workflow.operation === 'add_columns_to_user_sheet' || workflow.operation === 'add_columns_to_folder') {
+    return (workflow.notes ? workflow.notes + ' ' : '') +
+      'This workflow only appends missing row-1 headers. It does not fill cells, rename headers, append rows, or reorder columns.';
   }
   return workflow.notes;
 }
@@ -547,6 +519,48 @@ function validatePushMissingRowsToFolderWorkflow_(workflow) {
 }
 
 /**
+ * Validates the sidebar append-missing-residents single-sheet workflow.
+ *
+ * @param {Object} workflow
+ * @return {Array<{status: string, message: string}>}
+ */
+function validatePushMissingRowsToUserSheetWorkflow_(workflow) {
+  var checks = [];
+  if (!workflow.masterId) checks.push({ status: 'error', message: 'Master spreadsheet is not set.' });
+  if (!workflow.userSheetId) checks.push({ status: 'error', message: 'User Sheet is not set.' });
+  if (checks.length > 0) return checks;
+
+  try {
+    var masterSs = SpreadsheetApp.openById(workflow.masterId);
+    var masterSheet = masterSs.getSheets()[0];
+    var masterData = masterSheet.getDataRange().getValues();
+    var masterHeaders = masterData.length > 0 ? masterData[0].map(function (h) { return String(h).trim(); }) : [];
+    var missingMaster = findMissingHeaders_(masterHeaders, ['resident_id', 'ZoneName']);
+    checks.push({ status: 'ok', message: 'Master found: ' + masterSs.getName() + ' (' + Math.max(masterData.length - 1, 0) + ' data rows).' });
+    if (missingMaster.length > 0) {
+      checks.push({ status: 'error', message: 'Master is missing: ' + missingMaster.join(', ') + '.' });
+    } else {
+      checks.push({ status: 'ok', message: 'Master has resident_id and ZoneName.' });
+    }
+
+    if (workflow.sensitiveColumns.length > 0) {
+      var missingSensitive = findMissingHeaders_(masterHeaders, workflow.sensitiveColumns);
+      if (missingSensitive.length > 0) {
+        checks.push({ status: 'warning', message: 'Configured sensitive columns not found in master and cannot be flagged: ' + missingSensitive.join(', ') + '.' });
+      } else {
+        checks.push({ status: 'ok', message: 'Sensitive columns are configured and present in master.' });
+      }
+    } else {
+      checks.push({ status: 'warning', message: 'No Sensitive Columns are configured; appended rows will not be privacy-flagged.' });
+    }
+  } catch (e) {
+    checks.push({ status: 'error', message: e.message });
+  }
+
+  return checks.concat(validateUserSheet_(workflow.userSheetId, ['resident_id', 'ZoneName'], true));
+}
+
+/**
  * Validates the sidebar Pull Data folder workflow.
  *
  * @param {Object} workflow
@@ -577,6 +591,76 @@ function validatePullMissingRowsFromFolderWorkflow_(workflow) {
 }
 
 /**
+ * Validates the sidebar Add Columns single-sheet workflow.
+ *
+ * @param {Object} workflow
+ * @return {Array<{status: string, message: string}>}
+ */
+function validateAddColumnsToUserSheetWorkflow_(workflow) {
+  var checks = [];
+  var columnNames = getAddColumnNamesFromWorkflow_(workflow);
+  if (!workflow.userSheetId) checks.push({ status: 'error', message: 'User Sheet is not set.' });
+  if (columnNames.length === 0) checks.push({ status: 'error', message: 'No columns are configured to add.' });
+  if (checks.length > 0) return checks;
+
+  try {
+    var ss = SpreadsheetApp.openById(workflow.userSheetId);
+    var sheet = ss.getSheets()[0];
+    var data = sheet.getDataRange().getValues();
+    var headers = data.length > 0 ? data[0].map(function (h) { return String(h).trim(); }) : [];
+    var missing = findMissingHeaders_(headers, columnNames);
+    checks.push({ status: 'ok', message: 'User sheet found: ' + ss.getName() + '.' });
+    checks.push({
+      status: missing.length > 0 ? 'warning' : 'ok',
+      message: missing.length > 0
+        ? 'Live run will add: ' + missing.join(', ') + '.'
+        : 'The user sheet already has all configured columns.'
+    });
+  } catch (e) {
+    checks.push({ status: 'error', message: e.message });
+  }
+
+  return checks;
+}
+
+/**
+ * Validates the sidebar Add Columns folder workflow.
+ *
+ * @param {Object} workflow
+ * @return {Array<{status: string, message: string}>}
+ */
+function validateAddColumnsToFolderWorkflow_(workflow) {
+  var checks = [];
+  var columnNames = getAddColumnNamesFromWorkflow_(workflow);
+  if (!workflow.folderId) checks.push({ status: 'error', message: 'User Sheets Folder is not set.' });
+  if (columnNames.length === 0) checks.push({ status: 'error', message: 'No columns are configured to add.' });
+  if (checks.length > 0) return checks;
+
+  try {
+    var files = getGoogleSheetFilesInFolder_(workflow.folderId);
+    var sheetsMissingColumns = 0;
+    for (var i = 0; i < files.length; i++) {
+      var ss = SpreadsheetApp.openById(files[i].getId());
+      var data = ss.getSheets()[0].getDataRange().getValues();
+      var headers = data.length > 0 ? data[0].map(function (h) { return String(h).trim(); }) : [];
+      if (findMissingHeaders_(headers, columnNames).length > 0) sheetsMissingColumns++;
+    }
+
+    checks.push({ status: files.length > 0 ? 'ok' : 'warning', message: 'Folder found with ' + files.length + ' Google Sheets.' });
+    checks.push({
+      status: sheetsMissingColumns > 0 ? 'warning' : 'ok',
+      message: sheetsMissingColumns > 0
+        ? sheetsMissingColumns + ' sheet(s) are missing one or more configured columns; live run will add them.'
+        : 'All folder sheets already have the configured columns.'
+    });
+  } catch (e) {
+    checks.push({ status: 'error', message: e.message });
+  }
+
+  return checks;
+}
+
+/**
  * Validates the sidebar Rename Columns folder workflow.
  *
  * @param {Object} workflow
@@ -600,6 +684,25 @@ function validateRenameColumnsInFolderWorkflow_(workflow) {
     checks.push({ status: 'error', message: e.message });
   }
   return checks;
+}
+
+/**
+ * Returns the unique target header names configured for an Add Columns workflow.
+ *
+ * @param {Object} workflow
+ * @return {Array<string>}
+ */
+function getAddColumnNamesFromWorkflow_(workflow) {
+  var names = [];
+  var seen = {};
+  var mappings = workflow.columnMap || [];
+  for (var i = 0; i < mappings.length; i++) {
+    var name = String(mappings[i].target || mappings[i].source || '').trim();
+    if (name === '' || seen[name]) continue;
+    names.push(name);
+    seen[name] = true;
+  }
+  return names;
 }
 
 /**
@@ -662,6 +765,37 @@ function validateFolderSheets_(folderId, requiredHeaders, includeZones) {
     }
     if (includeZones && zones.length > 0) {
       checks.push({ status: 'ok', message: 'Detected zones: ' + zones.slice(0, 8).join('; ') + (zones.length > 8 ? '; ...' : '') });
+    }
+  } catch (e) {
+    checks.push({ status: 'error', message: e.message });
+  }
+  return checks;
+}
+
+/**
+ * @param {string} userSheetId
+ * @param {Array<string>} requiredHeaders
+ * @param {boolean} includeZone
+ * @return {Array<{status: string, message: string}>}
+ */
+function validateUserSheet_(userSheetId, requiredHeaders, includeZone) {
+  var checks = [];
+  if (!userSheetId) return [{ status: 'error', message: 'User Sheet is not set.' }];
+  try {
+    var ss = SpreadsheetApp.openById(userSheetId);
+    var sheet = ss.getSheets()[0];
+    var data = sheet.getDataRange().getValues();
+    var headers = data.length > 0 ? data[0].map(function (h) { return String(h).trim(); }) : [];
+    var missing = findMissingHeaders_(headers, requiredHeaders);
+
+    checks.push({ status: 'ok', message: 'User sheet found: ' + ss.getName() + ' (' + Math.max(data.length - 1, 0) + ' data rows).' });
+    if (missing.length > 0) {
+      checks.push({ status: 'error', message: 'User sheet is missing required headers: ' + missing.join(', ') + '.' });
+    } else {
+      checks.push({ status: 'ok', message: 'User sheet has required headers: ' + requiredHeaders.join(', ') + '.' });
+    }
+    if (includeZone && headers.indexOf('ZoneName') !== -1) {
+      checks.push({ status: 'ok', message: 'Detected zone: ' + (detectZoneFromData_(data, headers) || '(no zone detected)') + '.' });
     }
   } catch (e) {
     checks.push({ status: 'error', message: e.message });
@@ -896,6 +1030,62 @@ function executePushToFolderWorkflow_(configSs, config, dryRun, logTab) {
 }
 
 /**
+ * Shared implementation for appending missing master residents into one
+ * configured captain sheet.
+ *
+ * @param {SpreadsheetApp.Spreadsheet} configSs
+ * @param {Object} config
+ * @param {boolean} dryRun
+ * @param {string} appendLogTab
+ * @param {string} flagLogTab
+ * @return {Object}
+ */
+function executePushMissingRowsToUserSheetWorkflow_(configSs, config, dryRun, appendLogTab, flagLogTab) {
+  var masterSs = SpreadsheetApp.openById(config.masterId);
+  var masterSheet = masterSs.getSheets()[0];
+  var masterData = masterSheet.getDataRange().getValues();
+  if (masterData.length === 0) throw new Error('Master spreadsheet is empty.');
+  var masterHdrs = masterData[0].map(function (h) { return String(h).trim(); });
+
+  var userSs = SpreadsheetApp.openById(config.userSheetId);
+  var userSheet = userSs.getSheets()[0];
+
+  var oldA = configSs.getSheetByName(appendLogTab); if (oldA) configSs.deleteSheet(oldA);
+  var oldF = configSs.getSheetByName(flagLogTab);   if (oldF) configSs.deleteSheet(oldF);
+
+  var result = appendMissingRowsToSheet_(userSheet, masterData, masterHdrs, config.sensitiveColumns, dryRun);
+  appendToMissingRowsLog_(configSs, appendLogTab, userSs.getName(), result.detectedZone, result);
+  if (result.flagged.length > 0) {
+    appendToFlaggedSensitiveLog_(configSs, flagLogTab, userSs.getName(), result.detectedZone, result);
+  }
+
+  return {
+    sourceSpreadsheet: masterSs.getName(),
+    targetSpreadsheet: userSs.getName(),
+    logTab: appendLogTab,
+    secondaryLogTab: result.flagged.length > 0 ? flagLogTab : '',
+    sheetsProcessed: 1,
+    columnsAdded: 0,
+    cellsFilled: 0,
+    cellsOverwritten: 0,
+    conflicts: 0,
+    rowsAppended: result.appended.length,
+    sensitiveFlags: result.flagged.length,
+    skipped: result.skipped ? result.skipped.length : 0,
+    errors: result.errors.length,
+    detectedZones: [userSs.getName() + ': ' + (result.detectedZone || '(none)')],
+    metrics: [
+      { label: 'Sheets processed', value: 1 },
+      { label: 'Rows appended', value: result.appended.length },
+      { label: 'Sensitive flags', value: result.flagged.length },
+      { label: 'Skipped rows', value: result.skipped ? result.skipped.length : 0 },
+      { label: 'Errors', value: result.errors.length }
+    ],
+    summaryLines: ['Detected zone: ' + (result.detectedZone || '(none)')]
+  };
+}
+
+/**
  * Shared implementation for appending missing master residents into every
  * captain sheet in a folder.
  *
@@ -1106,6 +1296,103 @@ function executePullMissingRowsFromFolderWorkflow_(configSs, config, dryRun, log
       { label: 'Errors', value: totals.errors }
     ],
     summaryLines: ['Skipped rows include blank resident_id values and duplicate resident_id values already in master or encountered earlier in this run.']
+  };
+}
+
+/**
+ * Shared implementation for Add Columns -> one user sheet.
+ *
+ * @param {SpreadsheetApp.Spreadsheet} configSs
+ * @param {Object} config
+ * @param {boolean} dryRun
+ * @param {string} logTab
+ * @return {Object}
+ */
+function executeAddColumnsToUserSheetWorkflow_(configSs, config, dryRun, logTab) {
+  var columnNames = getAddColumnNamesFromWorkflow_(config);
+  if (columnNames.length === 0) throw new Error('No columns are configured to add.');
+
+  var userSs = SpreadsheetApp.openById(config.userSheetId);
+  var userSheet = userSs.getSheets()[0];
+
+  var old = configSs.getSheetByName(logTab);
+  if (old) configSs.deleteSheet(old);
+
+  var result = addColumnsToTarget_(userSheet, columnNames, dryRun);
+  appendToAddColumnsLog_(configSs, logTab, userSs.getName(), result);
+
+  return {
+    sourceSpreadsheet: 'Configured headers',
+    targetSpreadsheet: userSs.getName(),
+    logTab: logTab,
+    sheetsProcessed: 1,
+    columnsAdded: result.added.length,
+    skipped: result.skipped.length,
+    errors: result.errors.length,
+    metrics: [
+      { label: 'Sheets processed', value: 1 },
+      { label: dryRun ? 'Columns that would be added' : 'Columns added', value: result.added.length },
+      { label: 'Already existed', value: result.skipped.length },
+      { label: 'Errors', value: result.errors.length }
+    ],
+    summaryLines: ['This schema-only workflow changes row-1 headers only. It does not fill data cells or append rows.']
+  };
+}
+
+/**
+ * Shared implementation for Add Columns -> folder.
+ *
+ * @param {SpreadsheetApp.Spreadsheet} configSs
+ * @param {Object} config
+ * @param {boolean} dryRun
+ * @param {string} logTab
+ * @return {Object}
+ */
+function executeAddColumnsToFolderWorkflow_(configSs, config, dryRun, logTab) {
+  var columnNames = getAddColumnNamesFromWorkflow_(config);
+  if (columnNames.length === 0) throw new Error('No columns are configured to add.');
+
+  var files = getGoogleSheetFilesInFolder_(config.folderId);
+  var old = configSs.getSheetByName(logTab);
+  if (old) configSs.deleteSheet(old);
+
+  var totals = { columnsAdded: 0, skipped: 0, errors: 0 };
+  for (var i = 0; i < files.length; i++) {
+    var file = files[i];
+    var fileName = file.getName();
+    try {
+      var ss = SpreadsheetApp.openById(file.getId());
+      var sheet = ss.getSheets()[0];
+      var result = addColumnsToTarget_(sheet, columnNames, dryRun);
+      appendToAddColumnsLog_(configSs, logTab, fileName, result);
+      totals.columnsAdded += result.added.length;
+      totals.skipped += result.skipped.length;
+      totals.errors += result.errors.length;
+    } catch (e) {
+      appendToAddColumnsLog_(configSs, logTab, fileName, {
+        added: [],
+        skipped: [],
+        errors: [{ column: '', message: e.message }]
+      });
+      totals.errors++;
+    }
+  }
+
+  return {
+    sourceSpreadsheet: 'Configured headers',
+    targetSpreadsheet: 'User Sheets Folder',
+    logTab: logTab,
+    sheetsProcessed: files.length,
+    columnsAdded: totals.columnsAdded,
+    skipped: totals.skipped,
+    errors: totals.errors,
+    metrics: [
+      { label: 'Sheets processed', value: files.length },
+      { label: dryRun ? 'Columns that would be added' : 'Columns added', value: totals.columnsAdded },
+      { label: 'Already existed', value: totals.skipped },
+      { label: 'Errors', value: totals.errors }
+    ],
+    summaryLines: ['This schema-only workflow changes row-1 headers only. It does not fill data cells or append rows.']
   };
 }
 
@@ -1847,14 +2134,14 @@ function setupSettingsTab_(ss) {
       'User Sheet',
       existingValues['User Sheet'] || '',
       'ID of a single user spreadsheet to push master data TO or pull missing rows FROM. ' +
-      'Only used by single-sheet Push and Pull operations. ' +
+      'Used by single-sheet Push, Pull, and Add Columns operations. ' +
       'Find it in the URL: docs.google.com/spreadsheets/d/[COPY THIS]/edit'
     ],
     [
       'User Sheets Folder',
       existingValues['User Sheets Folder'] || existingValues['Target Folder'] || '',
       'ID of the Drive folder containing all user sheets. ' +
-      'Used by folder-wide Push, Pull, and Rename operations. ' +
+      'Used by folder-wide Push, Pull, Add Columns, and Rename operations. ' +
       'Find it at the end of the folder URL: drive.google.com/drive/folders/[COPY THIS]'
     ],
     [
@@ -2009,7 +2296,8 @@ function setupWorkflowPresetsTab_(ss) {
     'Column Mappings',
     'Notes',
     'Column Policies',
-    'User Sheets Folder'
+    'User Sheets Folder',
+    'User Sheet'
   ];
 
   var existingData = tab.getDataRange().getValues();
@@ -2023,10 +2311,12 @@ function setupWorkflowPresetsTab_(ss) {
 
   tab.getRange(1, 9).setNote(
     'One mapping per line. Use either:\n\n' +
+    'Header To Add\n' +
+    'or\n' +
     'Source Header -> Target Header\n' +
     'or\n' +
     'Source Header | Target Header\n\n' +
-    'If source and target use the same header, write it on both sides.'
+    'For Add Columns workflows, a single header name is enough.'
   );
   tab.getRange(1, 11).setNote(
     'One policy per line. Use:\n\n' +
@@ -2064,7 +2354,7 @@ function setupWorkflowPresetsTab_(ss) {
       'Sales History -> overwrite'
     ].join('\n');
 
-    tab.getRange(2, 1, 6, headers.length).setValues([
+    tab.getRange(2, 1, 9, headers.length).setValues([
       [
         'sales-import',
         'Update Master From Sales Tracker',
@@ -2077,6 +2367,7 @@ function setupWorkflowPresetsTab_(ss) {
         salesMappings,
         'Imports the one-row-per-APN sales rollup into the master. Start with Dry Run.',
         salesPolicies,
+        '',
         ''
       ],
       [
@@ -2091,7 +2382,8 @@ function setupWorkflowPresetsTab_(ss) {
         dashboardMappings,
         'Pushes dashboard-facing fields from master to every captain sheet in the folder. Start with Dry Run.',
         dashboardPolicies,
-        settings.folderId || ''
+        settings.folderId || '',
+        ''
       ],
       [
         'push-missing-residents',
@@ -2105,7 +2397,23 @@ function setupWorkflowPresetsTab_(ss) {
         '',
         'Appends master residents missing from each captain sheet by detected ZoneName. Existing captain rows are never modified.',
         '',
-        settings.folderId || ''
+        settings.folderId || '',
+        ''
+      ],
+      [
+        'push-missing-residents-one-sheet',
+        'Push Missing Residents to One Captain Sheet',
+        'push_missing_rows_to_user_sheet',
+        'Yes',
+        '',
+        '',
+        settings.masterId || '',
+        'resident_id',
+        '',
+        'Appends master residents missing from the configured User Sheet by detected ZoneName. Existing captain rows are never modified.',
+        '',
+        '',
+        settings.userSheetId || ''
       ],
       [
         'pull-captain-data',
@@ -2119,7 +2427,8 @@ function setupWorkflowPresetsTab_(ss) {
         '',
         'Pulls captain-entered values into master using the Pull Column Policy tab. Start with Dry Run.',
         '',
-        settings.folderId || ''
+        settings.folderId || '',
+        ''
       ],
       [
         'pull-missing-captain-rows',
@@ -2133,7 +2442,38 @@ function setupWorkflowPresetsTab_(ss) {
         '',
         'Appends captain-created resident rows that do not already exist in master. Existing master rows are never modified.',
         '',
-        settings.folderId || ''
+        settings.folderId || '',
+        ''
+      ],
+      [
+        'add-columns-user-sheet',
+        'Add Columns to One Captain Sheet',
+        'add_columns_to_user_sheet',
+        'Yes',
+        '',
+        '',
+        '',
+        '',
+        '',
+        'Adds configured row-1 headers to the single User Sheet setting. Fill Column Mappings with one header per line, then start with Dry Run.',
+        '',
+        '',
+        settings.userSheetId || ''
+      ],
+      [
+        'add-columns-folder',
+        'Add Columns to Captain Sheets Folder',
+        'add_columns_to_folder',
+        'Yes',
+        '',
+        '',
+        '',
+        '',
+        '',
+        'Adds configured row-1 headers across every captain sheet in the folder. Fill Column Mappings with one header per line, then start with Dry Run.',
+        '',
+        settings.folderId || '',
+        ''
       ],
       [
         'rename-captain-column',
@@ -2147,7 +2487,8 @@ function setupWorkflowPresetsTab_(ss) {
         '',
         'Renames one row-1 header across every captain sheet using Settings values. Dry Run is required for review before live changes.',
         '',
-        settings.folderId || ''
+        settings.folderId || '',
+        ''
       ]
     ]);
   } else {
@@ -2168,7 +2509,8 @@ function setupWorkflowPresetsTab_(ss) {
   tab.setColumnWidth(10, 360);
   tab.setColumnWidth(11, 320);
   tab.setColumnWidth(12, 280);
-  tab.getRange(2, 9, Math.max(tab.getMaxRows() - 1, 1), 4).setWrap(true);
+  tab.setColumnWidth(13, 280);
+  tab.getRange(2, 9, Math.max(tab.getMaxRows() - 1, 1), 5).setWrap(true);
 }
 
 /**
@@ -2271,6 +2613,16 @@ function seedDefaultAdditionalSidebarWorkflows_(tab, ss) {
     'User Sheets Folder': settings.folderId || ''
   });
   appendWorkflowPresetIfMissing_(tab, {
+    'Workflow ID': 'push-missing-residents-one-sheet',
+    'Workflow Name': 'Push Missing Residents to One Captain Sheet',
+    'Operation': 'push_missing_rows_to_user_sheet',
+    'Enabled': 'Yes',
+    'Master Spreadsheet': settings.masterId || '',
+    'Match Column': 'resident_id',
+    'Notes': 'Appends master residents missing from the configured User Sheet by detected ZoneName. Existing captain rows are never modified.',
+    'User Sheet': settings.userSheetId || ''
+  });
+  appendWorkflowPresetIfMissing_(tab, {
     'Workflow ID': 'pull-captain-data',
     'Workflow Name': 'Pull Captain Data Into Master',
     'Operation': 'pull_data_from_folder',
@@ -2288,6 +2640,22 @@ function seedDefaultAdditionalSidebarWorkflows_(tab, ss) {
     'Master Spreadsheet': settings.masterId || '',
     'Match Column': 'resident_id',
     'Notes': 'Appends captain-created resident rows that do not already exist in master. Existing master rows are never modified.',
+    'User Sheets Folder': settings.folderId || ''
+  });
+  appendWorkflowPresetIfMissing_(tab, {
+    'Workflow ID': 'add-columns-user-sheet',
+    'Workflow Name': 'Add Columns to One Captain Sheet',
+    'Operation': 'add_columns_to_user_sheet',
+    'Enabled': 'Yes',
+    'Notes': 'Adds configured row-1 headers to the single User Sheet setting. Fill Column Mappings with one header per line, then start with Dry Run.',
+    'User Sheet': settings.userSheetId || ''
+  });
+  appendWorkflowPresetIfMissing_(tab, {
+    'Workflow ID': 'add-columns-folder',
+    'Workflow Name': 'Add Columns to Captain Sheets Folder',
+    'Operation': 'add_columns_to_folder',
+    'Enabled': 'Yes',
+    'Notes': 'Adds configured row-1 headers across every captain sheet in the folder. Fill Column Mappings with one header per line, then start with Dry Run.',
     'User Sheets Folder': settings.folderId || ''
   });
   appendWorkflowPresetIfMissing_(tab, {

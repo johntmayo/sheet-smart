@@ -43,8 +43,10 @@
 - **Update Master From Sales Tracker** — imports the formula-generated `Sales Rollup by APN` tab into the master by `APN`. Default mapped fields: `Address - Sold Since Fire`, `Sales History`, `Latest Sale Date`, `Latest Sale Price`, `Latest New Owner`. Default policy: `overwrite` for these sales-owned fields. Dry run shows proposed overwrites before live run writes them.
 - **Push Dashboard Fields to Captain Sheets** — pushes dashboard-facing fields from the master to every spreadsheet in `User Sheets Folder` by `APN`. Default mapped fields: `Address - Sold Since Fire`, `Sales History`. Default policy: `overwrite`, because master is authoritative for these dashboard fields.
 - **Push Missing Residents to Captain Sheets** — wraps Push Missing Rows → User Sheets Folder. It appends only master residents matching each sheet's detected `ZoneName`, shows detected zones, rows appended, sensitive-data flags, skipped rows, and errors, and never modifies existing rows.
+- **Push Missing Residents to One Captain Sheet** — wraps Push Missing Rows → User Sheet for the configured `User Sheet`, using the same detected-zone append-only behavior and sensitive-data flagging.
 - **Pull Captain Data Into Master** — wraps Pull Data ← User Sheets Folder. It reads `Pull Column Policy`, shows policy effects in the sidebar, and summarizes filled cells, overwrites, conflicts, appended rows, skipped rows, and errors.
 - **Pull Missing Captain Rows Into Master** — wraps Pull Missing Rows ← User Sheets Folder. It appends captain-created rows missing from master, adds source-only headers first, and summarizes appended rows, columns added, blank/duplicate `resident_id` skips, and errors.
+- **Add Columns to One Captain Sheet** / **Add Columns to Captain Sheets Folder** — schema-only workflows that add configured row-1 headers when missing and log Added/Skipped/Error results without filling cells or appending rows.
 - **Rename Column Across Captain Sheets** — wraps Rename Columns → User Sheets Folder with explicit dry-run language before a live row-1 header change across the folder.
 
 **Core sales operating loop now supported in the sidebar:**
@@ -68,6 +70,7 @@ This is the main sales-data publishing loop: raw sales events roll up by APN, th
 
 **Key behaviors:**
 - Cell-fill operations automatically add missing target columns before filling data.
+- Add Columns sidebar workflows expose header-only column additions for one captain sheet or the whole captain folder.
 - New columns are appended after the last existing column, formatted as plain General (no inherited checkboxes).
 - Legacy Import/Push operations remain conservative: blank cells are filled; non-blank disagreements are conflicts and are not overwritten.
 - Sidebar workflows can use per-column policies (`fill_blank`, `overwrite`, `conflict`, `never`); dry runs show proposed overwrites before live runs write them.
