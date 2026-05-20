@@ -368,6 +368,87 @@ function parseDisplayDate_(text) {
 }
 
 /**
+ * Normalizes a source cell before writing it into a mapped target column.
+ * Apps Script may read imported dates as raw Sheets serial numbers, so date
+ * columns need conversion back to Date objects before setValue().
+ *
+ * @param {*} value
+ * @param {{source: string, target: string}} mapping
+ * @return {*}
+ */
+function normalizeMappedSourceValueForWrite_(value, mapping) {
+  if (typeof value === 'string') {
+    var lower = value.trim().toLowerCase();
+    if (lower === 'true') return true;
+    if (lower === 'false') return false;
+  }
+
+  if (isDateColumnName_(mapping.source) || isDateColumnName_(mapping.target)) {
+    var dateValue = coerceToDateValue_(value);
+    if (dateValue) return dateValue;
+  }
+
+  return value;
+}
+
+/**
+ * Returns the number format needed for a normalized write value.
+ *
+ * @param {*} value
+ * @param {{source: string, target: string}} mapping
+ * @return {string}
+ */
+function getWriteNumberFormat_(value, mapping) {
+  if (Object.prototype.toString.call(value) === '[object Date]' && !isNaN(value.getTime())) {
+    return 'm/d/yyyy';
+  }
+  if (typeof value === 'boolean') return 'General';
+  if (isDateColumnName_(mapping.source) || isDateColumnName_(mapping.target)) return 'm/d/yyyy';
+  return '';
+}
+
+/**
+ * Identifies mapped columns that should behave as dates.
+ *
+ * @param {string} columnName
+ * @return {boolean}
+ */
+function isDateColumnName_(columnName) {
+  return /\bdate\b/i.test(String(columnName || ''));
+}
+
+/**
+ * Converts common date-like source values to Date objects.
+ *
+ * @param {*} value
+ * @return {Date|null}
+ */
+function coerceToDateValue_(value) {
+  if (Object.prototype.toString.call(value) === '[object Date]' && !isNaN(value.getTime())) {
+    return value;
+  }
+
+  if (typeof value === 'number' && isFinite(value)) {
+    if (value < 1 || value > 60000) return null;
+    var wholeDays = Math.floor(value);
+    var date = new Date(1899, 11, 30);
+    date.setDate(date.getDate() + wholeDays);
+    return date;
+  }
+
+  if (typeof value === 'string') {
+    var text = value.trim();
+    var match = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (match) return new Date(Number(match[3]), Number(match[1]) - 1, Number(match[2]));
+
+    match = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if (match) return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  }
+
+  return null;
+}
+
+/**
  * Left-pads month/day numbers used in comparison keys.
  *
  * @param {*} value
@@ -520,12 +601,7 @@ function mergeIntoTarget_(targetSheet, sourceLookup, matchColumn, columnMap, dry
     for (var c = 0; c < columnMap.length; c++) {
       if (targetColIndices[c] === -1) continue;
 
-      var sourceVal = sourceRow[columnMap[c].source];
-      if (typeof sourceVal === 'string' && sourceVal.toLowerCase() === 'true') {
-        sourceVal = true;
-      } else if (typeof sourceVal === 'string' && sourceVal.toLowerCase() === 'false') {
-        sourceVal = false;
-      }
+      var sourceVal = normalizeMappedSourceValueForWrite_(sourceRow[columnMap[c].source], columnMap[c]);
       var targetVal = data[r][targetColIndices[c]];
 
       // Treat boolean false as blank: it is the default state of an unchecked
@@ -549,6 +625,7 @@ function mergeIntoTarget_(targetSheet, sourceLookup, matchColumn, columnMap, dry
             row: r + 1,
             col: targetColIndices[c] + 1,
             val: sourceVal,
+            numberFormat: getWriteNumberFormat_(sourceVal, columnMap[c]),
             wasCheckbox: (targetVal === false)
           });
         }
@@ -571,7 +648,9 @@ function mergeIntoTarget_(targetSheet, sourceLookup, matchColumn, columnMap, dry
       var cell = targetSheet.getRange(writeQueue[w].row, writeQueue[w].col);
       if (writeQueue[w].wasCheckbox) {
         cell.clearDataValidations();
-        cell.setNumberFormat('General');
+      }
+      if (writeQueue[w].numberFormat) {
+        cell.setNumberFormat(writeQueue[w].numberFormat);
       }
       cell.setValue(writeQueue[w].val);
     }
@@ -662,12 +741,7 @@ function mergeIntoTargetWithPolicies_(targetSheet, sourceLookup, matchColumn, co
 
       var mapping = columnMap[c];
       var policy = policies[mapping.target] || policies[mapping.source] || 'fill_blank';
-      var sourceVal = sourceRow[mapping.source];
-      if (typeof sourceVal === 'string' && sourceVal.toLowerCase() === 'true') {
-        sourceVal = true;
-      } else if (typeof sourceVal === 'string' && sourceVal.toLowerCase() === 'false') {
-        sourceVal = false;
-      }
+      var sourceVal = normalizeMappedSourceValueForWrite_(sourceRow[mapping.source], mapping);
 
       var targetVal = data[r][targetColIndices[c]];
       var targetBlank = (targetVal === '' || targetVal === null || targetVal === undefined || targetVal === false);
@@ -700,6 +774,7 @@ function mergeIntoTargetWithPolicies_(targetSheet, sourceLookup, matchColumn, co
             row: r + 1,
             col: targetColIndices[c] + 1,
             val: sourceVal,
+            numberFormat: getWriteNumberFormat_(sourceVal, mapping),
             wasCheckbox: (targetVal === false)
           });
         }
@@ -716,6 +791,7 @@ function mergeIntoTargetWithPolicies_(targetSheet, sourceLookup, matchColumn, co
             row: r + 1,
             col: targetColIndices[c] + 1,
             val: sourceVal,
+            numberFormat: getWriteNumberFormat_(sourceVal, mapping),
             wasCheckbox: (targetVal === false)
           });
         }
@@ -739,7 +815,9 @@ function mergeIntoTargetWithPolicies_(targetSheet, sourceLookup, matchColumn, co
       var cell = targetSheet.getRange(writeQueue[w].row, writeQueue[w].col);
       if (writeQueue[w].wasCheckbox) {
         cell.clearDataValidations();
-        cell.setNumberFormat('General');
+      }
+      if (writeQueue[w].numberFormat) {
+        cell.setNumberFormat(writeQueue[w].numberFormat);
       }
       cell.setValue(writeQueue[w].val);
     }
