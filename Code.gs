@@ -11,7 +11,7 @@ const MASTER_SPREADSHEET_ID = 'your-master-spreadsheet-id-here';
 /**
  * Main entry point. Scans every spreadsheet in the target folder,
  * compares columns and row membership against the master, counts
- * non-blank cells, and writes a six-tab audit report to a new
+ * non-blank cells, and writes a seven-tab audit report to a new
  * spreadsheet.
  */
 function runAudit() {
@@ -28,6 +28,7 @@ function runAudit() {
   const residentIdEntries = [];
   const missingRowsAll = [];
   const extraRowsAll = [];
+  const missingSitusRowsAll = [];
 
   sheets.forEach(function (file) {
     var id = file.getId();
@@ -43,6 +44,7 @@ function runAudit() {
         name, url, lastEdited, lastEditor,
         'ERROR', '', '', '', '', '', '',
         '',
+        '',
         '', '', '',
         '', '', e.message
       ]);
@@ -57,6 +59,7 @@ function runAudit() {
         name, url, lastEdited, lastEditor,
         0, 0, '', '', '', '', '',
         '(no data)',
+        '',
         '', '', '',
         '', '', 'Empty'
       ]);
@@ -71,6 +74,10 @@ function runAudit() {
     var zoneDisplay = assignedZone || '(no zone detected)';
 
     collectResidentIds_(headers, dataRows, name, url, residentIdEntries);
+    var missingSitusRows = collectRowsMissingSitusAddress_(
+      headers, dataRows, name, url, assignedZone
+    );
+    for (var ms = 0; ms < missingSitusRows.length; ms++) missingSitusRowsAll.push(missingSitusRows[ms]);
 
     var masterSet = {};
     masterHeaders.forEach(function (h) { masterSet[h] = true; });
@@ -112,6 +119,7 @@ function runAudit() {
       soldCount,
       missingApn,
       zoneDisplay,
+      missingSitusRows.length,
       membership.missingCount,
       membership.extraNotInMasterCount,
       membership.extraWrongZoneCount,
@@ -142,7 +150,8 @@ function runAudit() {
   var duplicateRows = findDuplicateResidentIds_(residentIdEntries);
   Logger.log('Duplicate rows found: ' + duplicateRows.length);
   Logger.log('Missing rows: ' + missingRowsAll.length + ', extra rows: ' + extraRowsAll.length);
-  writeReport_(masterHeaders, overviewRows, detailRows, duplicateRows, missingRowsAll, extraRowsAll);
+  Logger.log('Rows missing required situs address fields: ' + missingSitusRowsAll.length);
+  writeReport_(masterHeaders, overviewRows, detailRows, duplicateRows, missingRowsAll, extraRowsAll, missingSitusRowsAll);
 }
 
 // -------  Internal helpers  -------
@@ -395,6 +404,46 @@ function countNonBlankInColumn_(headers, dataRows, columnName) {
   return count;
 }
 
+function collectRowsMissingSitusAddress_(headers, dataRows, sheetName, url, assignedZone) {
+  var houseCol = headers.indexOf('_SitusHouseNo');
+  var streetCol = headers.indexOf('_SitusStreet');
+  var residentIdCol = headers.indexOf('resident_id');
+  var nameCol = headers.indexOf('Resident Name');
+  var legacyHouseCol = headers.indexOf('House');
+  var legacyStreetCol = headers.indexOf('Street');
+  var rows = [];
+
+  dataRows.forEach(function (row, i) {
+    var situsHouse = (houseCol !== -1) ? row[houseCol] : '';
+    var situsStreet = (streetCol !== -1) ? row[streetCol] : '';
+    var missingFields = [];
+
+    if (isBlankCell_(situsHouse)) missingFields.push('_SitusHouseNo');
+    if (isBlankCell_(situsStreet)) missingFields.push('_SitusStreet');
+    if (missingFields.length === 0) return;
+
+    rows.push([
+      sheetName,
+      url,
+      assignedZone || '',
+      i + 2,
+      (residentIdCol !== -1) ? String(row[residentIdCol] || '').trim() : '',
+      (nameCol !== -1) ? String(row[nameCol] || '').trim() : '',
+      (legacyHouseCol !== -1) ? String(row[legacyHouseCol] || '').trim() : '',
+      (legacyStreetCol !== -1) ? String(row[legacyStreetCol] || '').trim() : '',
+      (houseCol !== -1) ? String(situsHouse || '').trim() : '(column missing)',
+      (streetCol !== -1) ? String(situsStreet || '').trim() : '(column missing)',
+      missingFields.join(', ')
+    ]);
+  });
+
+  return rows;
+}
+
+function isBlankCell_(value) {
+  return value === '' || value === null || value === undefined || String(value).trim() === '';
+}
+
 function collectResidentIds_(headers, dataRows, sheetName, url, entries) {
   var col = headers.indexOf('resident_id');
   if (col === -1) {
@@ -460,7 +509,7 @@ function auditReportTitle_() {
   return 'Sheet Scan — Audit Report — ' + stamp;
 }
 
-function writeReport_(masterHeaders, overviewRows, detailRows, duplicateRows, missingRowsAll, extraRowsAll) {
+function writeReport_(masterHeaders, overviewRows, detailRows, duplicateRows, missingRowsAll, extraRowsAll, missingSitusRowsAll) {
   var report = SpreadsheetApp.create(auditReportTitle_());
 
   // --- Tab 1: Overview ---
@@ -472,6 +521,7 @@ function writeReport_(masterHeaders, overviewRows, detailRows, duplicateRows, mi
     'For Sale (TRUE)', 'Sold Since Fire (TRUE)',
     'Addresses Missing APN',
     'Zone',
+    'Rows Missing Situs Address',
     'Missing Rows', 'Extra (Not in Master)', 'Extra (Wrong Zone)',
     'Missing vs Master', 'Extra vs Master', 'Status'
   ];
@@ -573,7 +623,28 @@ function writeReport_(masterHeaders, overviewRows, detailRows, duplicateRows, mi
   formatHeaderRow_(extraSheet, exHeader.length);
   autoResize_(extraSheet, exHeader.length);
 
-  [overviewSheet, detailSheet, masterSheet, dupSheet, missingSheet, extraSheet].forEach(function (s) {
+  // --- Tab 7: Missing Situs Address ---
+  var situsSheet = report.insertSheet('Missing Situs Address');
+  var situsHeader = [
+    'Spreadsheet', 'URL', 'ZoneName', 'Row #', 'resident_id',
+    'Resident Name', 'House', 'Street', '_SitusHouseNo', '_SitusStreet',
+    'Missing Field(s)'
+  ];
+  if (missingSitusRowsAll.length > 0) {
+    var situsData = [situsHeader].concat(missingSitusRowsAll);
+    situsSheet
+      .getRange(1, 1, situsData.length, situsHeader.length)
+      .setValues(situsData);
+  } else {
+    situsSheet
+      .getRange(1, 1, 1, situsHeader.length)
+      .setValues([situsHeader]);
+    situsSheet.getRange(2, 1).setValue('No rows missing _SitusHouseNo or _SitusStreet found.');
+  }
+  formatHeaderRow_(situsSheet, situsHeader.length);
+  autoResize_(situsSheet, situsHeader.length);
+
+  [overviewSheet, detailSheet, masterSheet, dupSheet, missingSheet, extraSheet, situsSheet].forEach(function (s) {
     s.setFrozenRows(1);
   });
 
@@ -615,16 +686,17 @@ function applyConditionalFormatting_(sheet, lastRow) {
       .build()
   );
 
-  // Row-membership drift (M Missing Rows, N Extra Not-in-Master,
-  // O Extra Wrong Zone): light red whenever any drift is present.
-  var missingRowsRange = sheet.getRange('M2:M' + lastRow);
-  var extraNotInMasterRange = sheet.getRange('N2:N' + lastRow);
-  var extraWrongZoneRange = sheet.getRange('O2:O' + lastRow);
+  // Required situs address fields (M) and row-membership drift (N-P):
+  // light red whenever any issue is present.
+  var missingSitusRange = sheet.getRange('M2:M' + lastRow);
+  var missingRowsRange = sheet.getRange('N2:N' + lastRow);
+  var extraNotInMasterRange = sheet.getRange('O2:O' + lastRow);
+  var extraWrongZoneRange = sheet.getRange('P2:P' + lastRow);
   rules.push(
     SpreadsheetApp.newConditionalFormatRule()
       .whenNumberGreaterThan(0)
       .setBackground('#f4cccc')
-      .setRanges([missingRowsRange, extraNotInMasterRange, extraWrongZoneRange])
+      .setRanges([missingSitusRange, missingRowsRange, extraNotInMasterRange, extraWrongZoneRange])
       .build()
   );
 
