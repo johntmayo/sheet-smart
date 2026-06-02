@@ -11,7 +11,7 @@ const MASTER_SPREADSHEET_ID = 'your-master-spreadsheet-id-here';
 /**
  * Main entry point. Scans every spreadsheet in the target folder,
  * compares columns and row membership against the master, counts
- * non-blank cells, and writes a seven-tab audit report to a new
+ * non-blank cells, and writes an eight-tab audit report to a new
  * spreadsheet.
  */
 function runAudit() {
@@ -29,6 +29,7 @@ function runAudit() {
   const missingRowsAll = [];
   const extraRowsAll = [];
   const missingSitusRowsAll = [];
+  const apnInconsistencyRowsAll = [];
 
   sheets.forEach(function (file) {
     var id = file.getId();
@@ -45,6 +46,7 @@ function runAudit() {
         'ERROR', '', '', '', '', '', '',
         '',
         '',
+        '',
         '', '', '',
         '', '', e.message
       ]);
@@ -59,6 +61,7 @@ function runAudit() {
         name, url, lastEdited, lastEditor,
         0, 0, '', '', '', '', '',
         '(no data)',
+        '',
         '',
         '', '', '',
         '', '', 'Empty'
@@ -98,6 +101,10 @@ function runAudit() {
     var forSaleCount = countTrueInColumn_(headers, dataRows, 'Address - For Sale');
     var soldCount = countTrueInColumn_(headers, dataRows, 'Address - Sold Since Fire');
     var missingApn = countUniqueAddressesMissingApn_(headers, dataRows);
+    var apnInconsistencyRows = collectApnInconsistencies_(
+      headers, dataRows, name, url, assignedZone
+    );
+    for (var ai = 0; ai < apnInconsistencyRows.length; ai++) apnInconsistencyRowsAll.push(apnInconsistencyRows[ai]);
 
     var membership = computeRowMembership_(
       headers, dataRows, name, url, assignedZone,
@@ -120,6 +127,7 @@ function runAudit() {
       missingApn,
       zoneDisplay,
       missingSitusRows.length,
+      apnInconsistencyRows.length,
       membership.missingCount,
       membership.extraNotInMasterCount,
       membership.extraWrongZoneCount,
@@ -151,7 +159,8 @@ function runAudit() {
   Logger.log('Duplicate rows found: ' + duplicateRows.length);
   Logger.log('Missing rows: ' + missingRowsAll.length + ', extra rows: ' + extraRowsAll.length);
   Logger.log('Rows missing required situs address fields: ' + missingSitusRowsAll.length);
-  writeReport_(masterHeaders, overviewRows, detailRows, duplicateRows, missingRowsAll, extraRowsAll, missingSitusRowsAll);
+  Logger.log('Addresses with APN inconsistencies: ' + apnInconsistencyRowsAll.length);
+  writeReport_(masterHeaders, overviewRows, detailRows, duplicateRows, missingRowsAll, extraRowsAll, missingSitusRowsAll, apnInconsistencyRowsAll);
 }
 
 // -------  Internal helpers  -------
@@ -440,6 +449,103 @@ function collectRowsMissingSitusAddress_(headers, dataRows, sheetName, url, assi
   return rows;
 }
 
+function collectApnInconsistencies_(headers, dataRows, sheetName, url, assignedZone) {
+  var apnCol = headers.indexOf('APN');
+  if (apnCol === -1) return [];
+
+  var groups = {};
+  dataRows.forEach(function (row, i) {
+    var addressInfo = addressKeyForRow_(headers, row);
+    if (addressInfo.key === '') return;
+
+    if (!groups[addressInfo.key]) {
+      groups[addressInfo.key] = {
+        displayAddress: addressInfo.displayAddress,
+        source: addressInfo.source,
+        totalRows: 0,
+        rowsWithApn: [],
+        rowsMissingApn: [],
+        apnValues: {}
+      };
+    }
+
+    var group = groups[addressInfo.key];
+    var sheetRow = i + 2;
+    var apn = row[apnCol];
+    group.totalRows++;
+    if (isBlankCell_(apn)) {
+      group.rowsMissingApn.push(sheetRow);
+    } else {
+      var apnDisplay = String(apn).trim();
+      group.rowsWithApn.push(sheetRow);
+      group.apnValues[apnDisplay] = true;
+    }
+  });
+
+  var rows = [];
+  Object.keys(groups).forEach(function (key) {
+    var group = groups[key];
+    var apnValues = Object.keys(group.apnValues).sort();
+    var hasMixedCompleteness = group.rowsWithApn.length > 0 && group.rowsMissingApn.length > 0;
+    var hasMultipleApns = apnValues.length > 1;
+    if (group.totalRows < 2 || (!hasMixedCompleteness && !hasMultipleApns)) return;
+
+    var reasons = [];
+    if (hasMixedCompleteness) reasons.push('Some rows missing APN');
+    if (hasMultipleApns) reasons.push('Multiple APN values at same address');
+
+    rows.push([
+      sheetName,
+      url,
+      assignedZone || '',
+      group.displayAddress,
+      group.source,
+      group.totalRows,
+      group.rowsWithApn.length,
+      group.rowsMissingApn.length,
+      apnValues.join(', '),
+      group.rowsMissingApn.join(', '),
+      reasons.join(' + ')
+    ]);
+  });
+
+  return rows;
+}
+
+function addressKeyForRow_(headers, row) {
+  var situsHouseCol = headers.indexOf('_SitusHouseNo');
+  var situsStreetCol = headers.indexOf('_SitusStreet');
+  var legacyHouseCol = headers.indexOf('House');
+  var legacyStreetCol = headers.indexOf('Street');
+  var addressCol = headers.indexOf('Address');
+
+  var situsHouse = (situsHouseCol !== -1) ? String(row[situsHouseCol] || '').trim() : '';
+  var situsStreet = (situsStreetCol !== -1) ? String(row[situsStreetCol] || '').trim() : '';
+  var situsAddress = (situsHouse + ' ' + situsStreet).trim();
+  if (situsHouse !== '' && situsStreet !== '') {
+    return buildAddressKey_(situsAddress, '_SitusHouseNo + _SitusStreet');
+  }
+
+  var legacyHouse = (legacyHouseCol !== -1) ? String(row[legacyHouseCol] || '').trim() : '';
+  var legacyStreet = (legacyStreetCol !== -1) ? String(row[legacyStreetCol] || '').trim() : '';
+  var legacyAddress = (legacyHouse + ' ' + legacyStreet).trim();
+  if (legacyAddress !== '') {
+    return buildAddressKey_(legacyAddress, 'House + Street');
+  }
+
+  var address = (addressCol !== -1) ? String(row[addressCol] || '').trim() : '';
+  return buildAddressKey_(address, 'Address');
+}
+
+function buildAddressKey_(address, source) {
+  var normalized = address.replace(/\s+/g, ' ').trim();
+  return {
+    key: normalized.toLowerCase(),
+    displayAddress: normalized,
+    source: normalized === '' ? '' : source
+  };
+}
+
 function isBlankCell_(value) {
   return value === '' || value === null || value === undefined || String(value).trim() === '';
 }
@@ -509,7 +615,7 @@ function auditReportTitle_() {
   return 'Sheet Scan — Audit Report — ' + stamp;
 }
 
-function writeReport_(masterHeaders, overviewRows, detailRows, duplicateRows, missingRowsAll, extraRowsAll, missingSitusRowsAll) {
+function writeReport_(masterHeaders, overviewRows, detailRows, duplicateRows, missingRowsAll, extraRowsAll, missingSitusRowsAll, apnInconsistencyRowsAll) {
   var report = SpreadsheetApp.create(auditReportTitle_());
 
   // --- Tab 1: Overview ---
@@ -522,6 +628,7 @@ function writeReport_(masterHeaders, overviewRows, detailRows, duplicateRows, mi
     'Addresses Missing APN',
     'Zone',
     'Rows Missing Situs Address',
+    'APN Inconsistent Addresses',
     'Missing Rows', 'Extra (Not in Master)', 'Extra (Wrong Zone)',
     'Missing vs Master', 'Extra vs Master', 'Status'
   ];
@@ -644,7 +751,28 @@ function writeReport_(masterHeaders, overviewRows, detailRows, duplicateRows, mi
   formatHeaderRow_(situsSheet, situsHeader.length);
   autoResize_(situsSheet, situsHeader.length);
 
-  [overviewSheet, detailSheet, masterSheet, dupSheet, missingSheet, extraSheet, situsSheet].forEach(function (s) {
+  // --- Tab 8: APN Inconsistencies ---
+  var apnSheet = report.insertSheet('APN Inconsistencies');
+  var apnHeader = [
+    'Spreadsheet', 'URL', 'ZoneName', 'Address', 'Address Source',
+    'Rows at Address', 'Rows with APN', 'Rows Missing APN',
+    'APN Value(s) Found', 'Missing APN Row #(s)', 'Reason'
+  ];
+  if (apnInconsistencyRowsAll.length > 0) {
+    var apnData = [apnHeader].concat(apnInconsistencyRowsAll);
+    apnSheet
+      .getRange(1, 1, apnData.length, apnHeader.length)
+      .setValues(apnData);
+  } else {
+    apnSheet
+      .getRange(1, 1, 1, apnHeader.length)
+      .setValues([apnHeader]);
+    apnSheet.getRange(2, 1).setValue('No APN inconsistencies found.');
+  }
+  formatHeaderRow_(apnSheet, apnHeader.length);
+  autoResize_(apnSheet, apnHeader.length);
+
+  [overviewSheet, detailSheet, masterSheet, dupSheet, missingSheet, extraSheet, situsSheet, apnSheet].forEach(function (s) {
     s.setFrozenRows(1);
   });
 
@@ -686,17 +814,19 @@ function applyConditionalFormatting_(sheet, lastRow) {
       .build()
   );
 
-  // Required situs address fields (M) and row-membership drift (N-P):
+  // Required situs address fields (M), APN inconsistencies (N),
+  // and row-membership drift (O-Q):
   // light red whenever any issue is present.
   var missingSitusRange = sheet.getRange('M2:M' + lastRow);
-  var missingRowsRange = sheet.getRange('N2:N' + lastRow);
-  var extraNotInMasterRange = sheet.getRange('O2:O' + lastRow);
-  var extraWrongZoneRange = sheet.getRange('P2:P' + lastRow);
+  var apnInconsistencyRange = sheet.getRange('N2:N' + lastRow);
+  var missingRowsRange = sheet.getRange('O2:O' + lastRow);
+  var extraNotInMasterRange = sheet.getRange('P2:P' + lastRow);
+  var extraWrongZoneRange = sheet.getRange('Q2:Q' + lastRow);
   rules.push(
     SpreadsheetApp.newConditionalFormatRule()
       .whenNumberGreaterThan(0)
       .setBackground('#f4cccc')
-      .setRanges([missingSitusRange, missingRowsRange, extraNotInMasterRange, extraWrongZoneRange])
+      .setRanges([missingSitusRange, apnInconsistencyRange, missingRowsRange, extraNotInMasterRange, extraWrongZoneRange])
       .build()
   );
 

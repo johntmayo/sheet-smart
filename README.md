@@ -75,6 +75,7 @@
    | **Pull Data ← User Sheet** | One user sheet | Master | Pull captain-entered values into existing master rows using `Pull Column Policy`; also appends missing rows |
    | **Pull Data ← User Sheets Folder** | All sheets in a folder | Master | Same as above, but across every sheet in the folder |
    | **Add Columns → User Sheet / Folder** | Workflow Presets (`Column Mappings`) | One user sheet or all sheets in a folder | Add configured row-1 headers when missing, without filling cells or changing rows |
+   | **Delete Columns → User Sheet / Folder** | Workflow Presets (`Column Mappings`) | One user sheet or all sheets in a folder | Delete configured columns, including all data in those columns |
    | **Rename Columns → User Sheets Folder** | Settings (`Rename Column - From`, `Rename Column - To`) | All sheets in a folder | Rename one header across all user sheets without touching row data |
 
    > The regular **Push** operations only fill blank cells inside existing rows — they never add rows. The **Push Missing Rows** and **Pull Missing Rows** operations only add rows — they never modify existing ones. Use Push and Pull together to keep user sheets and master aligned.
@@ -144,6 +145,7 @@
       - **Pull Captain Data Into Master** — applies `Pull Column Policy` while importing captain-entered values and appending missing rows.
       - **Pull Missing Captain Rows Into Master** — appends captain-created rows missing from master and adds source-only headers first.
       - **Add Columns to One Captain Sheet** / **Add Columns to Captain Sheets Folder** — adds configured row-1 headers only. Put one header per line in the workflow's `Column Mappings` cell.
+      - **Delete Columns from One Captain Sheet** / **Delete Columns from Captain Sheets Folder** — deletes configured columns and all data in those columns. Put one header per line in the workflow's `Column Mappings` cell and review Dry Run first.
       - **Rename Column Across Captain Sheets** — previews or renames one row-1 header across the captain folder; use Dry Run as the review step.
 
       Workflow `Column Policies` use one line per target/source column:
@@ -167,6 +169,7 @@
    - **Pull Missing Rows** appends whole new rows at the bottom of the master, populated by header-name join from each user sheet. User-sheet columns missing from master are added to master first. Existing master rows are never modified; rows are never removed. Running it multiple times is safe — residents already in master are skipped.
    - **Pull Data** updates existing master rows according to `Pull Column Policy`, then appends rows whose `resident_id` is not already in master. Source blank cells never overwrite master values.
    - **Add Columns workflows** append configured headers to row 1 only. They do not fill cells, append rows, rename headers, or reorder columns.
+   - **Delete Columns workflows** remove the entire matching column, including row-1 header, values, notes, validation, and formatting. Dry Run logs the original column index and non-blank data cell count before live deletion.
    - **Sidebar workflow imports** can also use per-column policies. In dry run, `overwrite` rows are listed as proposed overwrites; in live mode they are written.
 
    ### Where results go
@@ -191,6 +194,8 @@
    | Sidebar workflow: Pull Missing Captain Rows Into Master | `Last Run - Pull Missing Captain Rows Into Master` | `Dry Run - Pull Missing Captain Rows Into Master` |
    | Sidebar workflow: Add Columns to One Captain Sheet | `Last Run - Add Columns to One Captain Sheet` | `Dry Run - Add Columns to One Captain Sheet` |
    | Sidebar workflow: Add Columns to Captain Sheets Folder | `Last Run - Add Columns to Captain Sheets Folder` | `Dry Run - Add Columns to Captain Sheets Folder` |
+   | Sidebar workflow: Delete Columns from One Captain Sheet | `Last Run - Delete Columns from One Captain Sheet` | `Dry Run - Delete Columns from One Captain Sheet` |
+   | Sidebar workflow: Delete Columns from Captain Sheets Folder | `Last Run - Delete Columns from Captain Sheets Folder` | `Dry Run - Delete Columns from Captain Sheets Folder` |
    | Sidebar workflow: Rename Column Across Captain Sheets | `Last Run - Rename Column Across Captain Sheets` | `Dry Run - Rename Column Across Captain Sheets` |
 
    The **Flagged - Sensitive Data** tab only appears when at least one appended row had a non-blank value in one or more `Sensitive Columns`. Each row lists the destination spreadsheet, the resident_id and name, and which sensitive columns were populated — so you can go to the captain whose zone the resident came from and confirm that sharing those notes with the new captain is okay.
@@ -205,5 +210,7 @@
    | Overwritten | A workflow import or Pull Data operation replaced an existing value because the column policy was `overwrite`. |
    | Appended | A whole new row was added at the bottom of the target (Push Missing Rows or Pull Missing Rows only). |
    | Renamed | The target header in row 1 was changed from the old name to the new name. |
+   | Would Delete | A dry run found a configured column that would be removed in a live delete-column run. |
+   | Deleted | A configured column was removed from the sheet, including all data in that column. |
    | Skipped | A row or schema change was intentionally skipped (e.g. duplicate `resident_id`, blank `resident_id`, old header missing, or new header already exists). |
    | Error | Something prevented the row or sheet from being processed. |

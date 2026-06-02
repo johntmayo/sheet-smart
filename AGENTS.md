@@ -71,6 +71,11 @@ The config spreadsheet holds:
 
 10. **Rename Columns → User Sheets Folder** — renames one header across every spreadsheet in the configured folder (row 1 only; data rows untouched).
 
+**Two delete-column operations (destructive schema changes):**
+
+11. **Delete Columns → User Sheet** — deletes configured columns from a single user spreadsheet, including all data in those columns.
+12. **Delete Columns → User Sheets Folder** — same as above, across every spreadsheet in the configured folder. Dry Run logs the original column index and non-blank data cell count before live deletion.
+
 A final menu item, **Set Up Config Tabs**, initializes the Settings and Column Mapping tabs with labels and instructions.
 
 **Settings keys used by each operation:**
@@ -84,6 +89,8 @@ A final menu item, **Set Up Config Tabs**, initializes the Settings and Column M
 - Pull Data ← User Sheet: `Master Spreadsheet`, `User Sheet`, `Pull Column Policy`
 - Pull Data ← User Sheets Folder: `Master Spreadsheet`, `User Sheets Folder`, `Pull Column Policy`
 - Rename Columns → User Sheets Folder: `User Sheets Folder`, `Rename Column - From`, `Rename Column - To`
+- Delete Columns → User Sheet: `User Sheet`, workflow `Column Mappings`
+- Delete Columns → User Sheets Folder: `User Sheets Folder`, workflow `Column Mappings`
 
 Each operation reads only its own settings; unused settings are ignored.
 
@@ -93,7 +100,7 @@ Each operation reads only its own settings; unused settings are ignored.
 
 **Sensitive column flagging (Push Missing Rows):** if a master row being appended has a non-blank value in any column listed under `Sensitive Columns`, the row is still appended, but also logged to the `Flagged - Sensitive Data` tab so the admin can confirm it's okay to share that data with the receiving captain. The push is never blocked — this is informational.
 
-**Outputs:** run summaries, metrics, and operation logs are written to **tabs on the same config spreadsheet** (`Last Import`, `Last Push - User Sheet`, `Last Push - Folder`, `Last Push - Missing Rows`, `Flagged - Sensitive Data`, `Last Pull - Missing Rows`, `Last Pull Data`, `Last Rename - Folder`, and dry-run variants).
+**Outputs:** run summaries, metrics, and operation logs are written to **tabs on the same config spreadsheet** (`Last Import`, `Last Push - User Sheet`, `Last Push - Folder`, `Last Push - Missing Rows`, `Flagged - Sensitive Data`, `Last Pull - Missing Rows`, `Last Pull Data`, `Last Rename - Folder`, sidebar `Last Run - ...` tabs including delete-column workflows, and dry-run variants).
 
 **UI:** `SpreadsheetApp.getUi()` and other container-bound APIs **are** used in `Corrections.gs` because the script is bound to the config spreadsheet. That restriction applies only to the **standalone** Phase 1 audit (`Code.gs`).
 

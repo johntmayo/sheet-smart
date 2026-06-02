@@ -116,6 +116,10 @@ function runWorkflowFromSidebar_(workflowId, dryRun) {
     result = executeAddColumnsToUserSheetWorkflow_(configSs, workflow, dryRun, logTab);
   } else if (workflow.operation === 'add_columns_to_folder') {
     result = executeAddColumnsToFolderWorkflow_(configSs, workflow, dryRun, logTab);
+  } else if (workflow.operation === 'delete_columns_from_user_sheet') {
+    result = executeDeleteColumnsFromUserSheetWorkflow_(configSs, workflow, dryRun, logTab);
+  } else if (workflow.operation === 'delete_columns_from_folder') {
+    result = executeDeleteColumnsFromFolderWorkflow_(configSs, workflow, dryRun, logTab);
   } else if (workflow.operation === 'rename_columns_in_folder') {
     result = executeRenameColumnsInFolderWorkflow_(configSs, workflow, dryRun, logTab);
   } else {
@@ -148,7 +152,7 @@ function buildWorkflowSidebarModel_(configSs, preset, includeChecks) {
     sourceTabName: workflow.sourceTabName,
     sourceLabel: getWorkflowSourceLabel_(workflow),
     matchColumn: getWorkflowMatchLabel_(workflow),
-    mappingCount: (workflow.operation === 'import_to_master' || workflow.operation === 'push_to_folder' || workflow.operation === 'add_columns_to_user_sheet' || workflow.operation === 'add_columns_to_folder') ? mappings.length : 0,
+    mappingCount: (workflow.operation === 'import_to_master' || workflow.operation === 'push_to_folder' || workflow.operation === 'add_columns_to_user_sheet' || workflow.operation === 'add_columns_to_folder' || workflow.operation === 'delete_columns_from_user_sheet' || workflow.operation === 'delete_columns_from_folder') ? mappings.length : 0,
     mappings: mappings,
     notes: getWorkflowNotes_(workflow),
     checks: checks,
@@ -171,6 +175,8 @@ function validateWorkflow_(workflow) {
   if (workflow.operation === 'pull_missing_rows_from_folder') return validatePullMissingRowsFromFolderWorkflow_(workflow);
   if (workflow.operation === 'add_columns_to_user_sheet') return validateAddColumnsToUserSheetWorkflow_(workflow);
   if (workflow.operation === 'add_columns_to_folder') return validateAddColumnsToFolderWorkflow_(workflow);
+  if (workflow.operation === 'delete_columns_from_user_sheet') return validateDeleteColumnsFromUserSheetWorkflow_(workflow);
+  if (workflow.operation === 'delete_columns_from_folder') return validateDeleteColumnsFromFolderWorkflow_(workflow);
   if (workflow.operation === 'rename_columns_in_folder') return validateRenameColumnsInFolderWorkflow_(workflow);
   return [{ status: 'error', message: 'Unsupported workflow operation: ' + workflow.operation }];
 }
@@ -228,6 +234,12 @@ function getWorkflowSourceLabel_(workflow) {
   if (workflow.operation === 'add_columns_to_folder') {
     return 'Configured headers -> captain sheets folder';
   }
+  if (workflow.operation === 'delete_columns_from_user_sheet') {
+    return 'Configured headers -> one captain sheet';
+  }
+  if (workflow.operation === 'delete_columns_from_folder') {
+    return 'Configured headers -> captain sheets folder';
+  }
   if (workflow.operation === 'rename_columns_in_folder') {
     return 'Captain sheets folder headers';
   }
@@ -244,7 +256,7 @@ function getWorkflowMatchLabel_(workflow) {
   if (workflow.operation === 'push_missing_rows_to_user_sheet' || workflow.operation === 'push_missing_rows_to_folder' || workflow.operation === 'pull_data_from_folder' || workflow.operation === 'pull_missing_rows_from_folder') {
     return 'resident_id';
   }
-  if (workflow.operation === 'add_columns_to_user_sheet' || workflow.operation === 'add_columns_to_folder') {
+  if (workflow.operation === 'add_columns_to_user_sheet' || workflow.operation === 'add_columns_to_folder' || workflow.operation === 'delete_columns_from_user_sheet' || workflow.operation === 'delete_columns_from_folder') {
     return 'Header names only';
   }
   if (workflow.operation === 'rename_columns_in_folder') {
@@ -276,6 +288,16 @@ function getWorkflowSidebarMappings_(workflow) {
         source: columnName,
         target: columnName,
         policy: 'add if missing; existing columns unchanged'
+      };
+    });
+  }
+  if (workflow.operation === 'delete_columns_from_user_sheet' || workflow.operation === 'delete_columns_from_folder') {
+    return workflow.columnMap.map(function (mapping) {
+      var columnName = mapping.target || mapping.source;
+      return {
+        source: columnName,
+        target: columnName,
+        policy: 'delete entire column, including existing data'
       };
     });
   }
@@ -333,6 +355,10 @@ function getWorkflowNotes_(workflow) {
   if (workflow.operation === 'add_columns_to_user_sheet' || workflow.operation === 'add_columns_to_folder') {
     return (workflow.notes ? workflow.notes + ' ' : '') +
       'This workflow only appends missing row-1 headers. It does not fill cells, rename headers, append rows, or reorder columns.';
+  }
+  if (workflow.operation === 'delete_columns_from_user_sheet' || workflow.operation === 'delete_columns_from_folder') {
+    return (workflow.notes ? workflow.notes + ' ' : '') +
+      'Dry Run previews matching headers and counts non-blank data cells. Live Run deletes the entire column, including all data in that column.';
   }
   return workflow.notes;
 }
@@ -661,6 +687,81 @@ function validateAddColumnsToFolderWorkflow_(workflow) {
 }
 
 /**
+ * Validates the sidebar Delete Columns single-sheet workflow.
+ *
+ * @param {Object} workflow
+ * @return {Array<{status: string, message: string}>}
+ */
+function validateDeleteColumnsFromUserSheetWorkflow_(workflow) {
+  var checks = [];
+  var columnNames = getSchemaColumnNamesFromWorkflow_(workflow);
+  if (!workflow.userSheetId) checks.push({ status: 'error', message: 'User Sheet is not set.' });
+  if (columnNames.length === 0) checks.push({ status: 'error', message: 'No columns are configured to delete.' });
+  if (checks.length > 0) return checks;
+
+  try {
+    var ss = SpreadsheetApp.openById(workflow.userSheetId);
+    var sheet = ss.getSheets()[0];
+    var data = sheet.getDataRange().getValues();
+    var headers = data.length > 0 ? data[0].map(function (h) { return String(h).trim(); }) : [];
+    var found = countPresentHeaders_(headers, columnNames);
+    checks.push({ status: 'ok', message: 'User sheet found: ' + ss.getName() + '.' });
+    checks.push({
+      status: found > 0 ? 'warning' : 'ok',
+      message: found > 0
+        ? 'Live run will delete ' + found + ' configured column(s), including their data.'
+        : 'None of the configured columns are present in this user sheet.'
+    });
+  } catch (e) {
+    checks.push({ status: 'error', message: e.message });
+  }
+
+  return checks;
+}
+
+/**
+ * Validates the sidebar Delete Columns folder workflow.
+ *
+ * @param {Object} workflow
+ * @return {Array<{status: string, message: string}>}
+ */
+function validateDeleteColumnsFromFolderWorkflow_(workflow) {
+  var checks = [];
+  var columnNames = getSchemaColumnNamesFromWorkflow_(workflow);
+  if (!workflow.folderId) checks.push({ status: 'error', message: 'User Sheets Folder is not set.' });
+  if (columnNames.length === 0) checks.push({ status: 'error', message: 'No columns are configured to delete.' });
+  if (checks.length > 0) return checks;
+
+  try {
+    var files = getGoogleSheetFilesInFolder_(workflow.folderId);
+    var sheetsWithColumns = 0;
+    var totalMatches = 0;
+    for (var i = 0; i < files.length; i++) {
+      var ss = SpreadsheetApp.openById(files[i].getId());
+      var data = ss.getSheets()[0].getDataRange().getValues();
+      var headers = data.length > 0 ? data[0].map(function (h) { return String(h).trim(); }) : [];
+      var found = countPresentHeaders_(headers, columnNames);
+      if (found > 0) {
+        sheetsWithColumns++;
+        totalMatches += found;
+      }
+    }
+
+    checks.push({ status: files.length > 0 ? 'ok' : 'warning', message: 'Folder found with ' + files.length + ' Google Sheets.' });
+    checks.push({
+      status: totalMatches > 0 ? 'warning' : 'ok',
+      message: totalMatches > 0
+        ? 'Live run will delete ' + totalMatches + ' configured column(s) across ' + sheetsWithColumns + ' sheet(s), including their data.'
+        : 'None of the configured columns are present in the folder sheets.'
+    });
+  } catch (e) {
+    checks.push({ status: 'error', message: e.message });
+  }
+
+  return checks;
+}
+
+/**
  * Validates the sidebar Rename Columns folder workflow.
  *
  * @param {Object} workflow
@@ -693,6 +794,16 @@ function validateRenameColumnsInFolderWorkflow_(workflow) {
  * @return {Array<string>}
  */
 function getAddColumnNamesFromWorkflow_(workflow) {
+  return getSchemaColumnNamesFromWorkflow_(workflow);
+}
+
+/**
+ * Returns the unique header names configured for schema-only workflows.
+ *
+ * @param {Object} workflow
+ * @return {Array<string>}
+ */
+function getSchemaColumnNamesFromWorkflow_(workflow) {
   var names = [];
   var seen = {};
   var mappings = workflow.columnMap || [];
@@ -703,6 +814,21 @@ function getAddColumnNamesFromWorkflow_(workflow) {
     seen[name] = true;
   }
   return names;
+}
+
+/**
+ * Counts how many configured headers are present in a header row.
+ *
+ * @param {Array<string>} headers
+ * @param {Array<string>} columnNames
+ * @return {number}
+ */
+function countPresentHeaders_(headers, columnNames) {
+  var count = 0;
+  for (var i = 0; i < columnNames.length; i++) {
+    if (headers.indexOf(columnNames[i]) !== -1) count++;
+  }
+  return count;
 }
 
 /**
@@ -1393,6 +1519,111 @@ function executeAddColumnsToFolderWorkflow_(configSs, config, dryRun, logTab) {
       { label: 'Errors', value: totals.errors }
     ],
     summaryLines: ['This schema-only workflow changes row-1 headers only. It does not fill data cells or append rows.']
+  };
+}
+
+/**
+ * Shared implementation for Delete Columns -> one user sheet.
+ *
+ * @param {SpreadsheetApp.Spreadsheet} configSs
+ * @param {Object} config
+ * @param {boolean} dryRun
+ * @param {string} logTab
+ * @return {Object}
+ */
+function executeDeleteColumnsFromUserSheetWorkflow_(configSs, config, dryRun, logTab) {
+  var columnNames = getSchemaColumnNamesFromWorkflow_(config);
+  if (columnNames.length === 0) throw new Error('No columns are configured to delete.');
+
+  var userSs = SpreadsheetApp.openById(config.userSheetId);
+  var userSheet = userSs.getSheets()[0];
+
+  var old = configSs.getSheetByName(logTab);
+  if (old) configSs.deleteSheet(old);
+
+  var result = deleteColumnsFromTarget_(userSheet, columnNames, dryRun);
+  appendToDeleteColumnsLog_(configSs, logTab, userSs.getName(), result, dryRun);
+
+  return {
+    sourceSpreadsheet: 'Configured headers',
+    targetSpreadsheet: userSs.getName(),
+    logTab: logTab,
+    sheetsProcessed: 1,
+    columnsDeleted: result.deleted.length,
+    skipped: result.skipped.length,
+    errors: result.errors.length,
+    metrics: [
+      { label: 'Sheets processed', value: 1 },
+      { label: dryRun ? 'Columns that would be deleted' : 'Columns deleted', value: result.deleted.length },
+      { label: 'Skipped', value: result.skipped.length },
+      { label: 'Errors', value: result.errors.length }
+    ],
+    summaryLines: [
+      dryRun
+        ? 'Dry Run only previews column deletions. Review non-blank cell counts before running live.'
+        : 'Live run deleted each matching column and all data in that column.'
+    ]
+  };
+}
+
+/**
+ * Shared implementation for Delete Columns -> folder.
+ *
+ * @param {SpreadsheetApp.Spreadsheet} configSs
+ * @param {Object} config
+ * @param {boolean} dryRun
+ * @param {string} logTab
+ * @return {Object}
+ */
+function executeDeleteColumnsFromFolderWorkflow_(configSs, config, dryRun, logTab) {
+  var columnNames = getSchemaColumnNamesFromWorkflow_(config);
+  if (columnNames.length === 0) throw new Error('No columns are configured to delete.');
+
+  var files = getGoogleSheetFilesInFolder_(config.folderId);
+  var old = configSs.getSheetByName(logTab);
+  if (old) configSs.deleteSheet(old);
+
+  var totals = { columnsDeleted: 0, skipped: 0, errors: 0 };
+  for (var i = 0; i < files.length; i++) {
+    var file = files[i];
+    var fileName = file.getName();
+    try {
+      var ss = SpreadsheetApp.openById(file.getId());
+      var sheet = ss.getSheets()[0];
+      var result = deleteColumnsFromTarget_(sheet, columnNames, dryRun);
+      appendToDeleteColumnsLog_(configSs, logTab, fileName, result, dryRun);
+      totals.columnsDeleted += result.deleted.length;
+      totals.skipped += result.skipped.length;
+      totals.errors += result.errors.length;
+    } catch (e) {
+      appendToDeleteColumnsLog_(configSs, logTab, fileName, {
+        deleted: [],
+        skipped: [],
+        errors: [{ column: '', message: e.message }]
+      }, dryRun);
+      totals.errors++;
+    }
+  }
+
+  return {
+    sourceSpreadsheet: 'Configured headers',
+    targetSpreadsheet: 'User Sheets Folder',
+    logTab: logTab,
+    sheetsProcessed: files.length,
+    columnsDeleted: totals.columnsDeleted,
+    skipped: totals.skipped,
+    errors: totals.errors,
+    metrics: [
+      { label: 'Sheets processed', value: files.length },
+      { label: dryRun ? 'Columns that would be deleted' : 'Columns deleted', value: totals.columnsDeleted },
+      { label: 'Skipped', value: totals.skipped },
+      { label: 'Errors', value: totals.errors }
+    ],
+    summaryLines: [
+      dryRun
+        ? 'Dry Run only previews column deletions. Review non-blank cell counts before running live.'
+        : 'Live run deleted each matching column and all data in that column.'
+    ]
   };
 }
 
@@ -2316,7 +2547,7 @@ function setupWorkflowPresetsTab_(ss) {
     'Source Header -> Target Header\n' +
     'or\n' +
     'Source Header | Target Header\n\n' +
-    'For Add Columns workflows, a single header name is enough.'
+    'For Add Columns and Delete Columns workflows, a single header name is enough.'
   );
   tab.getRange(1, 11).setNote(
     'One policy per line. Use:\n\n' +
@@ -2354,7 +2585,7 @@ function setupWorkflowPresetsTab_(ss) {
       'Sales History -> overwrite'
     ].join('\n');
 
-    tab.getRange(2, 1, 9, headers.length).setValues([
+    tab.getRange(2, 1, 11, headers.length).setValues([
       [
         'sales-import',
         'Update Master From Sales Tracker',
@@ -2471,6 +2702,36 @@ function setupWorkflowPresetsTab_(ss) {
         '',
         '',
         'Adds configured row-1 headers across every captain sheet in the folder. Fill Column Mappings with one header per line, then start with Dry Run.',
+        '',
+        settings.folderId || '',
+        ''
+      ],
+      [
+        'delete-columns-user-sheet',
+        'Delete Columns from One Captain Sheet',
+        'delete_columns_from_user_sheet',
+        'Yes',
+        '',
+        '',
+        '',
+        '',
+        '',
+        'Deletes configured columns from the single User Sheet setting, including all data in those columns. Fill Column Mappings with one header per line, then start with Dry Run.',
+        '',
+        '',
+        settings.userSheetId || ''
+      ],
+      [
+        'delete-columns-folder',
+        'Delete Columns from Captain Sheets Folder',
+        'delete_columns_from_folder',
+        'Yes',
+        '',
+        '',
+        '',
+        '',
+        '',
+        'Deletes configured columns across every captain sheet in the folder, including all data in those columns. Fill Column Mappings with one header per line, then start with Dry Run.',
         '',
         settings.folderId || '',
         ''
@@ -2656,6 +2917,22 @@ function seedDefaultAdditionalSidebarWorkflows_(tab, ss) {
     'Operation': 'add_columns_to_folder',
     'Enabled': 'Yes',
     'Notes': 'Adds configured row-1 headers across every captain sheet in the folder. Fill Column Mappings with one header per line, then start with Dry Run.',
+    'User Sheets Folder': settings.folderId || ''
+  });
+  appendWorkflowPresetIfMissing_(tab, {
+    'Workflow ID': 'delete-columns-user-sheet',
+    'Workflow Name': 'Delete Columns from One Captain Sheet',
+    'Operation': 'delete_columns_from_user_sheet',
+    'Enabled': 'Yes',
+    'Notes': 'Deletes configured columns from the single User Sheet setting, including all data in those columns. Fill Column Mappings with one header per line, then start with Dry Run.',
+    'User Sheet': settings.userSheetId || ''
+  });
+  appendWorkflowPresetIfMissing_(tab, {
+    'Workflow ID': 'delete-columns-folder',
+    'Workflow Name': 'Delete Columns from Captain Sheets Folder',
+    'Operation': 'delete_columns_from_folder',
+    'Enabled': 'Yes',
+    'Notes': 'Deletes configured columns across every captain sheet in the folder, including all data in those columns. Fill Column Mappings with one header per line, then start with Dry Run.',
     'User Sheets Folder': settings.folderId || ''
   });
   appendWorkflowPresetIfMissing_(tab, {

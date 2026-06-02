@@ -934,6 +934,78 @@ function addColumnsToTarget_(targetSheet, columnNames, dryRun) {
 }
 
 /**
+ * Deletes configured columns from a target sheet. A live run removes the full
+ * sheet column, including row-1 header, values, notes, validation, and format.
+ *
+ * @param {SpreadsheetApp.Sheet} targetSheet
+ * @param {Array<string>} columnNames  Ordered list of column names to delete
+ * @param {boolean} dryRun             If true, log only — never write
+ * @return {{ deleted: Array<{column: string, index: number, nonBlankCells: number}>, skipped: Array<{column: string, note: string}>, errors: Array<{column: string, message: string}> }}
+ */
+function deleteColumnsFromTarget_(targetSheet, columnNames, dryRun) {
+  var deleted = [];
+  var skipped = [];
+  var errors = [];
+
+  var data = targetSheet.getDataRange().getValues();
+  if (data.length === 0) {
+    errors.push({ column: '', message: 'Target sheet is empty' });
+    return { deleted: deleted, skipped: skipped, errors: errors };
+  }
+
+  var headers = data[0].map(function (h) { return String(h).trim(); });
+  for (var i = 0; i < columnNames.length; i++) {
+    var colName = String(columnNames[i]).trim();
+    if (colName === '') continue;
+
+    var idx = headers.indexOf(colName);
+    if (idx === -1) {
+      skipped.push({ column: colName, note: 'Header not found' });
+      continue;
+    }
+
+    deleted.push({
+      column: colName,
+      index: idx + 1,
+      nonBlankCells: countNonBlankCellsBelowHeader_(data, idx)
+    });
+  }
+
+  if (!dryRun && deleted.length > 0) {
+    if (targetSheet.getMaxColumns() - deleted.length < 1) {
+      for (var e = 0; e < deleted.length; e++) {
+        errors.push({ column: deleted[e].column, message: 'Cannot delete every column in the sheet' });
+      }
+      return { deleted: [], skipped: skipped, errors: errors };
+    }
+
+    var toDelete = deleted.slice().sort(function (a, b) { return b.index - a.index; });
+    for (var d = 0; d < toDelete.length; d++) {
+      targetSheet.deleteColumn(toDelete[d].index);
+    }
+    SpreadsheetApp.flush();
+  }
+
+  return { deleted: deleted, skipped: skipped, errors: errors };
+}
+
+/**
+ * Counts data cells below the header that are not empty/null/undefined.
+ *
+ * @param {Array<Array>} data
+ * @param {number} columnIndex
+ * @return {number}
+ */
+function countNonBlankCellsBelowHeader_(data, columnIndex) {
+  var count = 0;
+  for (var r = 1; r < data.length; r++) {
+    var value = data[r][columnIndex];
+    if (value !== '' && value !== null && value !== undefined) count++;
+  }
+  return count;
+}
+
+/**
  * Appends combined sync results (column additions + fills + conflicts + errors)
  * to a single log tab, creating it with a header row if needed.
  * Used by the unified Sync operations so all results land in one place.
@@ -1031,6 +1103,54 @@ function appendToAddColumnsLog_(spreadsheet, tabName, sheetName, results) {
   }
   for (var k = 0; k < results.errors.length; k++) {
     newRows.push(['Error', sheetName, results.errors[k].column, results.errors[k].message]);
+  }
+
+  if (newRows.length > 0) {
+    var startRow = tab.getLastRow() + 1;
+    tab.getRange(startRow, 1, newRows.length, header.length).setValues(newRows);
+  }
+}
+
+/**
+ * Appends delete-columns results to a log tab, creating the tab with
+ * a header row if it does not yet exist. Used when accumulating
+ * results across many target sheets.
+ *
+ * @param {SpreadsheetApp.Spreadsheet} spreadsheet
+ * @param {string} tabName
+ * @param {string} sheetName
+ * @param {{ deleted: Array, skipped: Array, errors: Array }} results
+ * @param {boolean=} dryRun
+ */
+function appendToDeleteColumnsLog_(spreadsheet, tabName, sheetName, results, dryRun) {
+  var tab = spreadsheet.getSheetByName(tabName);
+  var header = ['Type', 'Spreadsheet', 'Column', 'Original Index', 'Non-Blank Data Cells', 'Notes'];
+
+  if (!tab) {
+    tab = spreadsheet.insertSheet(tabName);
+    tab.getRange(1, 1, 1, header.length).setValues([header]);
+    formatHeaderRow_(tab, header.length);
+    tab.setFrozenRows(1);
+  }
+
+  var newRows = [];
+
+  for (var i = 0; i < results.deleted.length; i++) {
+    var deleted = results.deleted[i];
+    newRows.push([
+      dryRun ? 'Would Delete' : 'Deleted',
+      sheetName,
+      deleted.column,
+      deleted.index,
+      deleted.nonBlankCells,
+      dryRun ? 'Dry run only; column and data were not changed' : 'Column and all data removed'
+    ]);
+  }
+  for (var j = 0; j < results.skipped.length; j++) {
+    newRows.push(['Skipped', sheetName, results.skipped[j].column, '', '', results.skipped[j].note || 'Header not found']);
+  }
+  for (var k = 0; k < results.errors.length; k++) {
+    newRows.push(['Error', sheetName, results.errors[k].column, '', '', results.errors[k].message]);
   }
 
   if (newRows.length > 0) {

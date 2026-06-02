@@ -47,6 +47,7 @@
 - **Pull Captain Data Into Master** — wraps Pull Data ← User Sheets Folder. It reads `Pull Column Policy`, shows policy effects in the sidebar, and summarizes filled cells, overwrites, conflicts, appended rows, skipped rows, and errors.
 - **Pull Missing Captain Rows Into Master** — wraps Pull Missing Rows ← User Sheets Folder. It appends captain-created rows missing from master, adds source-only headers first, and summarizes appended rows, columns added, blank/duplicate `resident_id` skips, and errors.
 - **Add Columns to One Captain Sheet** / **Add Columns to Captain Sheets Folder** — schema-only workflows that add configured row-1 headers when missing and log Added/Skipped/Error results without filling cells or appending rows.
+- **Delete Columns from One Captain Sheet** / **Delete Columns from Captain Sheets Folder** — schema workflows that delete configured columns and all data in those columns; dry runs log original index and non-blank data cell counts before live deletion.
 - **Rename Column Across Captain Sheets** — wraps Rename Columns → User Sheets Folder with explicit dry-run language before a live row-1 header change across the folder.
 
 **Core sales operating loop now supported in the sidebar:**
@@ -76,6 +77,7 @@ This is the main sales-data publishing loop: raw sales events roll up by APN, th
 - Sidebar workflows can use per-column policies (`fill_blank`, `overwrite`, `conflict`, `never`); dry runs show proposed overwrites before live runs write them.
 - Date comparisons are normalized to avoid false conflicts where Sheets displays identical dates but Apps Script returns different raw value types.
 - Row-append operations append only; they never modify or remove existing rows.
+- Delete Columns workflows remove the entire matching column, including its header and existing data; dry runs should be reviewed before live runs.
 - Pull Data never writes source blank cells into master; unlisted columns default to conflict-only, and `resident_id` is always protected.
 - Sync logs include Filled, Overwritten, Conflict, Skipped, Error, and related operation-specific types.
 - The sidebar must not auto-load a workflow on open. It should show workflow cards and wait for the user to explicitly choose one.
