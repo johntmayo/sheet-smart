@@ -19,6 +19,7 @@ function runAudit() {
   const masterHeaders = masterData.headers;
   const masterRoster = masterData.roster;
   const masterResidents = masterData.residents;
+  const rowMembershipSkipReason = masterData.rowMembershipSkipReason || '';
 
   const folder = DriveApp.getFolderById(FOLDER_ID);
   const sheets = collectSpreadsheets_(folder);
@@ -43,10 +44,8 @@ function runAudit() {
     } catch (e) {
       overviewRows.push([
         name, url, lastEdited, lastEditor,
-        'ERROR', '', '', '', '', '', '',
-        '',
-        '',
-        '',
+        'ERROR', '', '', '',
+        '', '', '',
         '', '', '',
         '', '', e.message
       ]);
@@ -59,11 +58,9 @@ function runAudit() {
     if (data.length === 0) {
       overviewRows.push([
         name, url, lastEdited, lastEditor,
-        0, 0, '', '', '', '', '',
-        '(no data)',
-        '',
-        '',
-        '', '', '',
+        0, 0, '', '',
+        '', '(no data)',
+        '', '', '', '',
         '', '', 'Empty'
       ]);
       return;
@@ -98,20 +95,27 @@ function runAudit() {
 
     var apnCount = countNonBlankInColumn_(headers, dataRows, 'APN');
     var damageCount = countNonBlankInColumn_(headers, dataRows, 'Damage');
-    var forSaleCount = countTrueInColumn_(headers, dataRows, 'Address - For Sale');
-    var soldCount = countTrueInColumn_(headers, dataRows, 'Address - Sold Since Fire');
     var missingApn = countUniqueAddressesMissingApn_(headers, dataRows);
     var apnInconsistencyRows = collectApnInconsistencies_(
       headers, dataRows, name, url, assignedZone
     );
     for (var ai = 0; ai < apnInconsistencyRows.length; ai++) apnInconsistencyRowsAll.push(apnInconsistencyRows[ai]);
 
-    var membership = computeRowMembership_(
-      headers, dataRows, name, url, assignedZone,
-      masterRoster, masterResidents
-    );
-    for (var mi = 0; mi < membership.missing.length; mi++) missingRowsAll.push(membership.missing[mi]);
-    for (var mx = 0; mx < membership.extra.length; mx++) extraRowsAll.push(membership.extra[mx]);
+    var membership = {
+      missing: [],
+      extra: [],
+      missingCount: 'N/A',
+      extraNotInMasterCount: 'N/A',
+      extraWrongZoneCount: 'N/A'
+    };
+    if (rowMembershipSkipReason === '') {
+      membership = computeRowMembership_(
+        headers, dataRows, name, url, assignedZone,
+        masterRoster, masterResidents
+      );
+      for (var mi = 0; mi < membership.missing.length; mi++) missingRowsAll.push(membership.missing[mi]);
+      for (var mx = 0; mx < membership.extra.length; mx++) extraRowsAll.push(membership.extra[mx]);
+    }
 
     overviewRows.push([
       name,
@@ -122,11 +126,8 @@ function runAudit() {
       totalDataRows,
       apnCount,
       damageCount,
-      forSaleCount,
-      soldCount,
       missingApn,
       zoneDisplay,
-      missingSitusRows.length,
       apnInconsistencyRows.length,
       membership.missingCount,
       membership.extraNotInMasterCount,
@@ -157,10 +158,14 @@ function runAudit() {
   Logger.log('Total resident_id entries collected: ' + residentIdEntries.length);
   var duplicateRows = findDuplicateResidentIds_(residentIdEntries);
   Logger.log('Duplicate rows found: ' + duplicateRows.length);
-  Logger.log('Missing rows: ' + missingRowsAll.length + ', extra rows: ' + extraRowsAll.length);
+  if (rowMembershipSkipReason === '') {
+    Logger.log('Missing rows: ' + missingRowsAll.length + ', extra rows: ' + extraRowsAll.length);
+  } else {
+    Logger.log(rowMembershipSkipReason);
+  }
   Logger.log('Rows missing required situs address fields: ' + missingSitusRowsAll.length);
   Logger.log('Addresses with APN inconsistencies: ' + apnInconsistencyRowsAll.length);
-  writeReport_(masterHeaders, overviewRows, detailRows, duplicateRows, missingRowsAll, extraRowsAll, missingSitusRowsAll, apnInconsistencyRowsAll);
+  writeReport_(masterHeaders, overviewRows, detailRows, duplicateRows, missingRowsAll, extraRowsAll, missingSitusRowsAll, apnInconsistencyRowsAll, rowMembershipSkipReason);
 }
 
 // -------  Internal helpers  -------
@@ -171,17 +176,21 @@ function runAudit() {
  *   - residents: resident_id -> { zoneName, name, address, masterRow }
  *   - roster:    zoneName    -> { resident_id: true, ... }
  *
- * Missing expected columns (resident_id, ZoneName, Resident Name,
- * House, Street) degrade gracefully: the returned structures simply
- * hold less information, and callers are responsible for handling
- * the blanks.
+ * Row-membership checks require resident_id and ZoneName. If either is
+ * missing, the audit still runs, but Missing Rows / Extra Rows are marked
+ * unavailable instead of generating misleading results.
  */
 function readMasterData_() {
   var ss = SpreadsheetApp.openById(MASTER_SPREADSHEET_ID);
   var sheet = ss.getSheets()[0];
   var data = sheet.getDataRange().getValues();
   if (data.length === 0) {
-    return { headers: [], roster: {}, residents: {} };
+    return {
+      headers: [],
+      roster: {},
+      residents: {},
+      rowMembershipSkipReason: 'Row membership audit skipped: master spreadsheet is empty.'
+    };
   }
 
   var rawHeaders = data[0].map(function (h) { return String(h).trim(); });
@@ -195,9 +204,20 @@ function readMasterData_() {
 
   var roster = {};
   var residents = {};
+  var missingRowMembershipColumns = [];
+  if (residentIdCol === -1) missingRowMembershipColumns.push('resident_id');
+  if (zoneCol === -1) missingRowMembershipColumns.push('ZoneName');
+  var rowMembershipSkipReason = missingRowMembershipColumns.length > 0
+    ? 'Row membership audit skipped: master spreadsheet is missing required column(s): ' + missingRowMembershipColumns.join(', ') + '.'
+    : '';
 
   if (residentIdCol === -1) {
-    return { headers: headers, roster: roster, residents: residents };
+    return {
+      headers: headers,
+      roster: roster,
+      residents: residents,
+      rowMembershipSkipReason: rowMembershipSkipReason
+    };
   }
 
   for (var i = 1; i < data.length; i++) {
@@ -224,7 +244,12 @@ function readMasterData_() {
     }
   }
 
-  return { headers: headers, roster: roster, residents: residents };
+  return {
+    headers: headers,
+    roster: roster,
+    residents: residents,
+    rowMembershipSkipReason: rowMembershipSkipReason
+  };
 }
 
 /**
@@ -514,16 +539,22 @@ function collectApnInconsistencies_(headers, dataRows, sheetName, url, assignedZ
 
 function addressKeyForRow_(headers, row) {
   var situsHouseCol = headers.indexOf('_SitusHouseNo');
+  var situsDirectionCol = headers.indexOf('_SitusDirection');
   var situsStreetCol = headers.indexOf('_SitusStreet');
+  var situsUnitCol = headers.indexOf('_SitusUnit');
   var legacyHouseCol = headers.indexOf('House');
   var legacyStreetCol = headers.indexOf('Street');
   var addressCol = headers.indexOf('Address');
 
   var situsHouse = (situsHouseCol !== -1) ? String(row[situsHouseCol] || '').trim() : '';
+  var situsDirection = (situsDirectionCol !== -1) ? String(row[situsDirectionCol] || '').trim() : '';
   var situsStreet = (situsStreetCol !== -1) ? String(row[situsStreetCol] || '').trim() : '';
-  var situsAddress = (situsHouse + ' ' + situsStreet).trim();
+  var situsUnit = (situsUnitCol !== -1) ? String(row[situsUnitCol] || '').trim() : '';
+  var situsAddress = [situsHouse, situsDirection, situsStreet, situsUnit].filter(function (part) {
+    return part !== '';
+  }).join(' ');
   if (situsHouse !== '' && situsStreet !== '') {
-    return buildAddressKey_(situsAddress, '_SitusHouseNo + _SitusStreet');
+    return buildAddressKey_(situsAddress, '_SitusHouseNo + _SitusDirection + _SitusStreet + _SitusUnit');
   }
 
   var legacyHouse = (legacyHouseCol !== -1) ? String(row[legacyHouseCol] || '').trim() : '';
@@ -615,7 +646,7 @@ function auditReportTitle_() {
   return 'Sheet Scan — Audit Report — ' + stamp;
 }
 
-function writeReport_(masterHeaders, overviewRows, detailRows, duplicateRows, missingRowsAll, extraRowsAll, missingSitusRowsAll, apnInconsistencyRowsAll) {
+function writeReport_(masterHeaders, overviewRows, detailRows, duplicateRows, missingRowsAll, extraRowsAll, missingSitusRowsAll, apnInconsistencyRowsAll, rowMembershipSkipReason) {
   var report = SpreadsheetApp.create(auditReportTitle_());
 
   // --- Tab 1: Overview ---
@@ -624,10 +655,8 @@ function writeReport_(masterHeaders, overviewRows, detailRows, duplicateRows, mi
     'Spreadsheet', 'URL', 'Last Edited', 'Last Editor',
     'Total Columns', 'Data Rows',
     'APN Values', 'Damage Values',
-    'For Sale (TRUE)', 'Sold Since Fire (TRUE)',
     'Addresses Missing APN',
     'Zone',
-    'Rows Missing Situs Address',
     'APN Inconsistent Addresses',
     'Missing Rows', 'Extra (Not in Master)', 'Extra (Wrong Zone)',
     'Missing vs Master', 'Extra vs Master', 'Status'
@@ -637,6 +666,7 @@ function writeReport_(masterHeaders, overviewRows, detailRows, duplicateRows, mi
     .getRange(1, 1, ovData.length, ovHeader.length)
     .setValues(ovData);
   formatHeaderRow_(overviewSheet, ovHeader.length);
+  applyOverviewHeaderNotes_(overviewSheet, ovHeader);
   autoResize_(overviewSheet, ovHeader.length);
 
   var lastDataRow = ovData.length;
@@ -701,6 +731,11 @@ function writeReport_(masterHeaders, overviewRows, detailRows, duplicateRows, mi
     missingSheet
       .getRange(1, 1, miData.length, miHeader.length)
       .setValues(miData);
+  } else if (rowMembershipSkipReason) {
+    missingSheet
+      .getRange(1, 1, 1, miHeader.length)
+      .setValues([miHeader]);
+    missingSheet.getRange(2, 1).setValue(rowMembershipSkipReason);
   } else {
     missingSheet
       .getRange(1, 1, 1, miHeader.length)
@@ -721,6 +756,11 @@ function writeReport_(masterHeaders, overviewRows, detailRows, duplicateRows, mi
     extraSheet
       .getRange(1, 1, exData.length, exHeader.length)
       .setValues(exData);
+  } else if (rowMembershipSkipReason) {
+    extraSheet
+      .getRange(1, 1, 1, exHeader.length)
+      .setValues([exHeader]);
+    extraSheet.getRange(2, 1).setValue(rowMembershipSkipReason);
   } else {
     extraSheet
       .getRange(1, 1, 1, exHeader.length)
@@ -786,21 +826,32 @@ function formatHeaderRow_(sheet, numCols) {
   range.setFontColor('#ffffff');
 }
 
+function applyOverviewHeaderNotes_(sheet, headers) {
+  var notesByHeader = {
+    'Missing Rows': 'Rows expected in this spreadsheet because their master ZoneName matches this sheet, but their resident_id is absent from this sheet. Shows N/A if the master is missing resident_id or ZoneName.',
+    'Extra (Not in Master)': 'Rows in this spreadsheet whose resident_id does not exist anywhere in the master spreadsheet. Shows N/A if the master is missing resident_id or ZoneName.',
+    'Extra (Wrong Zone)': 'Rows in this spreadsheet whose resident_id exists in master, but the master ZoneName belongs to a different sheet zone. Shows N/A if the master is missing resident_id or ZoneName.',
+    'Missing vs Master': 'Master column headers that are missing from this spreadsheet.',
+    'Extra vs Master': 'Column headers present in this spreadsheet that are not present in the master spreadsheet.'
+  };
+  var notes = [headers.map(function (header) {
+    return notesByHeader[header] || '';
+  })];
+  sheet.getRange(1, 1, 1, headers.length).setNotes(notes);
+}
+
 function applyConditionalFormatting_(sheet, lastRow) {
   var rules = [];
 
-  // APN Values (G), Damage Values (H), For Sale (I), Sold Since Fire (J):
-  // light red when < 20.
+  // APN Values (G) and Damage Values (H): light red when < 20.
   var apnRange = sheet.getRange('G2:G' + lastRow);
   var dmgRange = sheet.getRange('H2:H' + lastRow);
-  var forSaleRange = sheet.getRange('I2:I' + lastRow);
-  var soldRange = sheet.getRange('J2:J' + lastRow);
 
   rules.push(
     SpreadsheetApp.newConditionalFormatRule()
       .whenNumberLessThan(20)
       .setBackground('#f4cccc')
-      .setRanges([apnRange, dmgRange, forSaleRange, soldRange])
+      .setRanges([apnRange, dmgRange])
       .build()
   );
 
@@ -814,19 +865,17 @@ function applyConditionalFormatting_(sheet, lastRow) {
       .build()
   );
 
-  // Required situs address fields (M), APN inconsistencies (N),
-  // and row-membership drift (O-Q):
+  // APN inconsistencies (K) and row-membership drift (L-N):
   // light red whenever any issue is present.
-  var missingSitusRange = sheet.getRange('M2:M' + lastRow);
-  var apnInconsistencyRange = sheet.getRange('N2:N' + lastRow);
-  var missingRowsRange = sheet.getRange('O2:O' + lastRow);
-  var extraNotInMasterRange = sheet.getRange('P2:P' + lastRow);
-  var extraWrongZoneRange = sheet.getRange('Q2:Q' + lastRow);
+  var apnInconsistencyRange = sheet.getRange('K2:K' + lastRow);
+  var missingRowsRange = sheet.getRange('L2:L' + lastRow);
+  var extraNotInMasterRange = sheet.getRange('M2:M' + lastRow);
+  var extraWrongZoneRange = sheet.getRange('N2:N' + lastRow);
   rules.push(
     SpreadsheetApp.newConditionalFormatRule()
       .whenNumberGreaterThan(0)
       .setBackground('#f4cccc')
-      .setRanges([missingSitusRange, apnInconsistencyRange, missingRowsRange, extraNotInMasterRange, extraWrongZoneRange])
+      .setRanges([apnInconsistencyRange, missingRowsRange, extraNotInMasterRange, extraWrongZoneRange])
       .build()
   );
 
