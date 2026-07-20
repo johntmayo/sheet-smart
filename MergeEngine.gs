@@ -265,21 +265,173 @@ function findMissingHeaders_(headers, required) {
  */
 function readPullColumnPolicies_(configSpreadsheet) {
   var policies = { resident_id: 'never' };
-  var tab = configSpreadsheet.getSheetByName('Pull Column Policy');
+  var tab = findPullColumnPolicySheet_(configSpreadsheet);
   if (!tab) return policies;
 
   var data = tab.getDataRange().getValues();
-  for (var i = 1; i < data.length; i++) {
-    var column = String(data[i][0]).trim();
-    var policy = normalizePullPolicy_(data[i][1]);
+  if (data.length === 0) return policies;
+
+  var table = findPullPolicyTable_(data);
+  if (!table) return policies;
+
+  for (var i = table.firstDataRow; i < data.length; i++) {
+    var row = data[i];
+    var column = String(row[table.nameCol] || '').trim();
+    var policyRaw = row[table.policyCol];
     if (column === '') continue;
     if (column.charAt(0) === '(' && column.charAt(column.length - 1) === ')') continue;
-    if (!policy) continue;
+
+    var policy = normalizePullPolicy_(policyRaw);
+    if (!policy && table.nameCol !== table.policyCol) {
+      // Some sheets accidentally swap Column Name and Policy.
+      policy = normalizePullPolicy_(column);
+      column = String(policyRaw || '').trim();
+    }
+    if (column === '' || !policy) continue;
     policies[column] = policy;
   }
 
   policies.resident_id = 'never';
   return policies;
+}
+
+/**
+ * Finds the Pull Column Policy tab by exact name, case-insensitive name,
+ * or a sheet name containing "pull column policy".
+ *
+ * @param {SpreadsheetApp.Spreadsheet} configSpreadsheet
+ * @return {SpreadsheetApp.Sheet|null}
+ */
+function findPullColumnPolicySheet_(configSpreadsheet) {
+  var exact = getConfigSheetByName_(configSpreadsheet, 'Pull Column Policy');
+  if (exact) return exact;
+
+  var needle = 'pull column policy';
+  var sheets = configSpreadsheet.getSheets();
+  for (var i = 0; i < sheets.length; i++) {
+    var name = String(sheets[i].getName()).trim().toLowerCase();
+    if (name.indexOf(needle) !== -1) return sheets[i];
+  }
+  return null;
+}
+
+/**
+ * Locates the header row and Column Name / Policy column indexes.
+ *
+ * @param {Array<Array>} data
+ * @return {{firstDataRow: number, nameCol: number, policyCol: number}|null}
+ */
+function findPullPolicyTable_(data) {
+  var maxScan = Math.min(data.length, 15);
+  for (var r = 0; r < maxScan; r++) {
+    var row = data[r];
+    var nameCol = -1;
+    var policyCol = -1;
+    for (var c = 0; c < row.length; c++) {
+      var cell = normalizePolicyHeaderCell_(row[c]);
+      if (cell === 'column name' || cell === 'column' || cell === 'header') nameCol = c;
+      if (cell === 'policy') policyCol = c;
+    }
+    if (nameCol !== -1 && policyCol !== -1) {
+      return { firstDataRow: r + 1, nameCol: nameCol, policyCol: policyCol };
+    }
+  }
+
+  if (data.length > 0) {
+    return { firstDataRow: 1, nameCol: 0, policyCol: 1 };
+  }
+  return null;
+}
+
+/**
+ * @param {*} value
+ * @return {string}
+ */
+function normalizePolicyHeaderCell_(value) {
+  return String(value || '')
+    .replace(/\u00a0/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * Finds a config tab by exact name, then by case-insensitive match.
+ *
+ * @param {SpreadsheetApp.Spreadsheet} configSpreadsheet
+ * @param {string} sheetName
+ * @return {SpreadsheetApp.Sheet|null}
+ */
+function getConfigSheetByName_(configSpreadsheet, sheetName) {
+  var wanted = String(sheetName || '').trim();
+  if (wanted === '') return null;
+
+  var tab = configSpreadsheet.getSheetByName(wanted);
+  if (tab) return tab;
+
+  var wantedLower = wanted.toLowerCase();
+  var sheets = configSpreadsheet.getSheets();
+  for (var i = 0; i < sheets.length; i++) {
+    if (String(sheets[i].getName()).trim().toLowerCase() === wantedLower) {
+      return sheets[i];
+    }
+  }
+  return null;
+}
+
+/**
+ * Merges workflow preset policies with the Pull Column Policy tab, preferring
+ * the tab when both define the same column.
+ *
+ * @param {SpreadsheetApp.Spreadsheet} configSpreadsheet
+ * @param {Object=} workflowPolicies
+ * @return {Object}
+ */
+function resolvePullColumnPoliciesForRun_(configSpreadsheet, workflowPolicies) {
+  var merged = {};
+  var presetPolicies = workflowPolicies || {};
+  var tabPolicies = readPullColumnPolicies_(configSpreadsheet);
+
+  for (var presetKey in presetPolicies) {
+    if (Object.prototype.hasOwnProperty.call(presetPolicies, presetKey)) {
+      merged[presetKey] = presetPolicies[presetKey];
+    }
+  }
+  for (var tabKey in tabPolicies) {
+    if (Object.prototype.hasOwnProperty.call(tabPolicies, tabKey)) {
+      merged[tabKey] = tabPolicies[tabKey];
+    }
+  }
+
+  merged.resident_id = 'never';
+  return merged;
+}
+
+/**
+ * @param {Object} policies
+ * @return {number}
+ */
+function countEditablePullPolicies_(policies) {
+  var count = 0;
+  policies = policies || {};
+  for (var key in policies) {
+    if (!Object.prototype.hasOwnProperty.call(policies, key)) continue;
+    if (key !== 'resident_id') count++;
+  }
+  return count;
+}
+
+/**
+ * Fails fast when Pull Data would otherwise treat every column as conflict.
+ *
+ * @param {Object} policies
+ */
+function assertPullColumnPoliciesLoaded_(policies) {
+  if (countEditablePullPolicies_(policies) > 0) return;
+  throw new Error(
+    'No Pull Column Policy rows were loaded from the config spreadsheet.\n\n' +
+    'Make sure this project is bound to Sheet Smart Config and that the tab ' +
+    '"Pull Column Policy" has Column Name / Policy rows (for example, Address Plan -> fill_blank).'
+  );
 }
 
 /**
@@ -289,12 +441,35 @@ function readPullColumnPolicies_(configSpreadsheet) {
  * @return {string}
  */
 function normalizePullPolicy_(raw) {
-  var policy = String(raw || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
-  if (policy === 'fill' || policy === 'fill_blanks' || policy === 'fill_blank_only') return 'fill_blank';
+  var policy = String(raw || '')
+    .replace(/\u00a0/g, ' ')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_');
+  if (policy === 'fill' || policy === 'fill_blank' || policy === 'fill_blanks' || policy === 'fill_blank_only') return 'fill_blank';
   if (policy === 'overwrite' || policy === 'replace') return 'overwrite';
   if (policy === 'conflict' || policy === 'log_conflict' || policy === 'log_only') return 'conflict';
   if (policy === 'never' || policy === 'skip' || policy === 'ignore') return 'never';
   return '';
+}
+
+/**
+ * Debug helper: run from Apps Script to verify policy loading.
+ */
+function debugPullColumnPolicies() {
+  var configSs = SpreadsheetApp.getActiveSpreadsheet();
+  var tab = findPullColumnPolicySheet_(configSs);
+  var policies = resolvePullColumnPoliciesForRun_(configSs, {});
+  var tabName = tab ? tab.getName() : '(not found)';
+  var count = countEditablePullPolicies_(policies);
+  var sample = Object.keys(policies).filter(function (key) { return key !== 'resident_id'; }).slice(0, 8).join(', ');
+  SpreadsheetApp.getUi().alert(
+    'Pull Column Policy debug\n\n' +
+    'Config spreadsheet: ' + configSs.getName() + '\n' +
+    'Policy tab found: ' + tabName + '\n' +
+    'Editable policies loaded: ' + count + '\n' +
+    (sample ? 'Sample columns: ' + sample : 'No editable policies were loaded.')
+  );
 }
 
 /**
@@ -334,17 +509,65 @@ function cellValuesEqual_(left, right) {
  * @return {string}
  */
 function normalizeCellValueForCompare_(value) {
-  if (value === null || value === undefined || value === '') return 'blank:';
+  if (isSpreadsheetCellBlank_(value)) return 'blank:';
   if (Object.prototype.toString.call(value) === '[object Date]' && !isNaN(value.getTime())) {
     return 'date:' + value.getFullYear() + '-' + pad2_(value.getMonth() + 1) + '-' + pad2_(value.getDate());
   }
-  if (typeof value === 'number') return 'number:' + String(value);
   if (typeof value === 'boolean') return 'boolean:' + String(value);
+  if (typeof value === 'number' && isFinite(value)) return 'number:' + String(value);
 
   var text = String(value).trim();
+  if (text === '') return 'blank:';
+
+  var booleanKey = normalizeBooleanTextForCompare_(text);
+  if (booleanKey !== '') return booleanKey;
+
+  var numericKey = normalizeNumericTextForCompare_(text);
+  if (numericKey !== '') return numericKey;
+
   var parsedDate = parseDisplayDate_(text);
   if (parsedDate) return parsedDate;
   return 'string:' + text;
+}
+
+/**
+ * Treats blank cells and unchecked checkbox defaults as empty.
+ *
+ * @param {*} value
+ * @return {boolean}
+ */
+function isSpreadsheetCellBlank_(value) {
+  return value === '' || value === null || value === undefined || value === false;
+}
+
+/**
+ * Source-side blank check. Unchecked checkbox values are real data.
+ *
+ * @param {*} value
+ * @return {boolean}
+ */
+function isSpreadsheetSourceCellBlank_(value) {
+  return value === '' || value === null || value === undefined;
+}
+
+/**
+ * @param {string} text
+ * @return {string}
+ */
+function normalizeBooleanTextForCompare_(text) {
+  var lower = String(text || '').trim().toLowerCase();
+  if (lower === 'true') return 'boolean:true';
+  if (lower === 'false') return 'boolean:false';
+  return '';
+}
+
+/**
+ * @param {string} text
+ * @return {string}
+ */
+function normalizeNumericTextForCompare_(text) {
+  if (!/^-?\d+(\.\d+)?$/.test(String(text || '').trim())) return '';
+  return 'number:' + String(Number(text));
 }
 
 /**
@@ -1811,11 +2034,10 @@ function pullDataIntoMaster_(masterSheet, sourceSheet, sourceName, pullColumnPol
       if (srcIdx === undefined) continue;
 
       var sourceVal = sourceRow[srcIdx];
-      var sourceBlank = (sourceVal === '' || sourceVal === null || sourceVal === undefined);
-      if (sourceBlank) continue;
+      if (isSpreadsheetSourceCellBlank_(sourceVal)) continue;
 
       var masterVal = masterRow[h];
-      var masterBlank = (masterVal === '' || masterVal === null || masterVal === undefined || masterVal === false);
+      var masterBlank = isSpreadsheetCellBlank_(masterVal);
       var policy = pullColumnPolicies[header] || 'conflict';
 
       if (policy === 'never') {

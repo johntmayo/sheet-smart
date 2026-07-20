@@ -98,6 +98,7 @@ function runWorkflowFromSidebar_(workflowId, dryRun) {
 
   var settings = readMergeConfig_(configSs);
   var workflow = buildEffectiveWorkflowConfig_(preset, settings);
+  workflow.pullColumnPolicies = resolvePullColumnPoliciesForRun_(configSs, preset.importColumnPolicies);
   var logTab = dryRun ? 'Dry Run - ' + preset.name : 'Last Run - ' + preset.name;
   var result;
   if (workflow.operation === 'import_to_master') {
@@ -143,6 +144,7 @@ function runWorkflowFromSidebar_(workflowId, dryRun) {
 function buildWorkflowSidebarModel_(configSs, preset, includeChecks) {
   var settings = readMergeConfig_(configSs);
   var workflow = buildEffectiveWorkflowConfig_(preset, settings);
+  workflow.pullColumnPolicies = resolvePullColumnPoliciesForRun_(configSs, preset.importColumnPolicies);
   var checks = includeChecks ? validateWorkflow_(workflow) : [];
   var mappings = getWorkflowSidebarMappings_(workflow);
   return {
@@ -207,9 +209,35 @@ function buildEffectiveWorkflowConfig_(preset, settings) {
     columnMap: preset.columnMap || [],
     importColumnPolicies: preset.importColumnPolicies || {},
     sensitiveColumns: settings.sensitiveColumns || [],
-    pullColumnPolicies: settings.pullColumnPolicies || {},
+    pullColumnPolicies: mergeWorkflowPullPolicies_(settings.pullColumnPolicies, preset.importColumnPolicies),
     notes: preset.notes || ''
   };
+}
+
+/**
+ * Combines tab/preset pull policies without re-reading the config spreadsheet.
+ *
+ * @param {Object=} tabPolicies
+ * @param {Object=} presetPolicies
+ * @return {Object}
+ */
+function mergeWorkflowPullPolicies_(tabPolicies, presetPolicies) {
+  var merged = {};
+  tabPolicies = tabPolicies || {};
+  presetPolicies = presetPolicies || {};
+
+  for (var presetKey in presetPolicies) {
+    if (Object.prototype.hasOwnProperty.call(presetPolicies, presetKey)) {
+      merged[presetKey] = presetPolicies[presetKey];
+    }
+  }
+  for (var tabKey in tabPolicies) {
+    if (Object.prototype.hasOwnProperty.call(tabPolicies, tabKey)) {
+      merged[tabKey] = tabPolicies[tabKey];
+    }
+  }
+  merged.resident_id = 'never';
+  return merged;
 }
 
 /**
@@ -599,8 +627,10 @@ function validatePullDataFromFolderWorkflow_(workflow) {
   var policies = workflow.pullColumnPolicies || {};
   var policyKeys = Object.keys(policies).filter(function (key) { return key !== 'resident_id'; });
   checks.push({
-    status: policyKeys.length > 0 ? 'ok' : 'warning',
-    message: 'Pull Column Policy has ' + policyKeys.length + ' editable column policy row(s). Unlisted columns default to conflict; resident_id is always never.'
+    status: policyKeys.length > 0 ? 'ok' : 'error',
+    message: policyKeys.length > 0
+      ? 'Pull Column Policy has ' + policyKeys.length + ' editable column policy row(s). Unlisted columns default to conflict; resident_id is always never.'
+      : 'Pull Column Policy has 0 editable rows loaded. Open the "Pull Column Policy" tab and add Column Name / Policy rows, then run debugPullColumnPolicies() from Apps Script to verify loading.'
   });
   return checks;
 }
@@ -1309,6 +1339,8 @@ function executePullDataFromFolderWorkflow_(configSs, config, dryRun, logTab) {
   var masterSheet = masterSs.getSheets()[0];
   var pullState = buildMasterPullDataState_(masterSheet);
   var files = getGoogleSheetFilesInFolder_(config.folderId);
+  var pullPolicies = resolvePullColumnPoliciesForRun_(configSs, config.importColumnPolicies);
+  assertPullColumnPoliciesLoaded_(pullPolicies);
 
   var old = configSs.getSheetByName(logTab);
   if (old) configSs.deleteSheet(old);
@@ -1320,7 +1352,7 @@ function executePullDataFromFolderWorkflow_(configSs, config, dryRun, logTab) {
     try {
       var ss = SpreadsheetApp.openById(file.getId());
       var sheet = ss.getSheets()[0];
-      var result = pullDataIntoMaster_(masterSheet, sheet, fileName, config.pullColumnPolicies, dryRun, pullState);
+      var result = pullDataIntoMaster_(masterSheet, sheet, fileName, pullPolicies, dryRun, pullState);
       appendToPullDataLog_(configSs, logTab, fileName, result);
       totals.columnsAdded += result.columnsAdded.length;
       totals.appended += result.appended.length;
@@ -2110,7 +2142,9 @@ function runPullDataFromSheet_(dryRun) {
     var old = configSs.getSheetByName(logTab);
     if (old) configSs.deleteSheet(old);
 
-    var result = pullDataIntoMaster_(masterSheet, userSheet, userSs.getName(), config.pullColumnPolicies, dryRun, pullState);
+    var pullPolicies = resolvePullColumnPoliciesForRun_(configSs, config.importColumnPolicies);
+    assertPullColumnPoliciesLoaded_(pullPolicies);
+    var result = pullDataIntoMaster_(masterSheet, userSheet, userSs.getName(), pullPolicies, dryRun, pullState);
     appendToPullDataLog_(configSs, logTab, userSs.getName(), result);
 
     var prefix = dryRun ? 'DRY RUN — Pull Data ← User Sheet\n\n' : 'Pull Data ← User Sheet complete.\n\n';
@@ -2160,6 +2194,9 @@ function runPullDataFromFolder_(dryRun) {
     var old = configSs.getSheetByName(logTab);
     if (old) configSs.deleteSheet(old);
 
+    var pullPolicies = resolvePullColumnPoliciesForRun_(configSs, config.importColumnPolicies);
+    assertPullColumnPoliciesLoaded_(pullPolicies);
+
     var totalColumnsAdded = 0, totalAppended = 0, totalFilled = 0, totalOverwritten = 0;
     var totalConflicts = 0, totalSkipped = 0, totalErrors = 0;
 
@@ -2169,7 +2206,7 @@ function runPullDataFromFolder_(dryRun) {
       try {
         var ss     = SpreadsheetApp.openById(file.getId());
         var sheet  = ss.getSheets()[0];
-        var result = pullDataIntoMaster_(masterSheet, sheet, fileName, config.pullColumnPolicies, dryRun, pullState);
+        var result = pullDataIntoMaster_(masterSheet, sheet, fileName, pullPolicies, dryRun, pullState);
 
         appendToPullDataLog_(configSs, logTab, fileName, result);
 
